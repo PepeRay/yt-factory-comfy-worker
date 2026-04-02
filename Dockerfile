@@ -50,10 +50,12 @@ RUN uv pip install comfy-cli pip setuptools wheel
 # Install ComfyUI
 RUN /usr/bin/yes | comfy --workspace /comfyui install --version "${COMFYUI_VERSION}" --nvidia
 
+# Force PyTorch compatible with CUDA 12.6 (comfy-cli may install too-new version)
+RUN uv pip install --force-reinstall torch torchvision torchaudio --index-url https://download.pytorch.org/whl/cu126
+
 WORKDIR /comfyui
 
-# Install ComfyUI's own requirements WITHOUT upgrading PyTorch
-# (PyTorch was already installed correctly for CUDA 12.6 by comfy-cli)
+# Install ComfyUI's remaining requirements (alembic, etc.) WITHOUT touching PyTorch
 RUN grep -v -i -E '^(torch|torchvision|torchaudio|nvidia)' requirements.txt > /tmp/reqs_no_torch.txt && \
     uv pip install -r /tmp/reqs_no_torch.txt && \
     rm /tmp/reqs_no_torch.txt
