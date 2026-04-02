@@ -41,7 +41,7 @@ mkdir -p /runpod-volume/jobs 2>/dev/null || true
 # Ensure ComfyUI dependencies are installed (WITHOUT upgrading PyTorch)
 echo "Checking ComfyUI dependencies..."
 cd /comfyui
-grep -v -i -E '^(torch|torchvision|torchaudio|nvidia)' requirements.txt > /tmp/reqs_no_torch.txt
+grep -v -i -E '^(torch==|torch>=|torch<=|torchvision|torchaudio|nvidia)' requirements.txt > /tmp/reqs_no_torch.txt
 pip install -r /tmp/reqs_no_torch.txt 2>&1 | tail -5
 rm /tmp/reqs_no_torch.txt
 echo "Dependencies check complete."

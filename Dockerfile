@@ -56,7 +56,8 @@ RUN uv pip install --force-reinstall torch torchvision torchaudio --index-url ht
 WORKDIR /comfyui
 
 # Install ComfyUI's remaining requirements (alembic, etc.) WITHOUT touching PyTorch
-RUN grep -v -i -E '^(torch|torchvision|torchaudio|nvidia)' requirements.txt > /tmp/reqs_no_torch.txt && \
+# Note: filter excludes torch/torchvision/torchaudio but NOT torchsde (separate package)
+RUN grep -v -i -E '^(torch==|torch>=|torch<=|torchvision|torchaudio|nvidia)' requirements.txt > /tmp/reqs_no_torch.txt && \
     uv pip install -r /tmp/reqs_no_torch.txt && \
     rm /tmp/reqs_no_torch.txt
 
