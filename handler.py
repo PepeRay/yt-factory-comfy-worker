@@ -21,6 +21,7 @@ COMFY_HOST = "127.0.0.1:8188"
 COMFY_API_AVAILABLE_INTERVAL_MS = int(os.environ.get("COMFY_API_AVAILABLE_INTERVAL_MS", 500))
 COMFY_API_AVAILABLE_MAX_RETRIES = int(os.environ.get("COMFY_API_AVAILABLE_MAX_RETRIES", 0))
 COMFY_POLLING_INTERVAL_MS = int(os.environ.get("COMFY_POLLING_INTERVAL_MS", 250))
+COMFY_EXECUTION_TIMEOUT = int(os.environ.get("COMFY_EXECUTION_TIMEOUT", 300))  # 5 min default
 NETWORK_VOLUME_PATH = os.environ.get("RUNPOD_NETWORK_VOLUME_PATH", "/runpod-volume")
 
 # Map of ComfyUI output subfolders to check for results
@@ -54,29 +55,74 @@ def queue_prompt(workflow_json):
         data=data,
         headers={"Content-Type": "application/json"},
     )
-    resp = urllib.request.urlopen(req)
+    try:
+        resp = urllib.request.urlopen(req)
+    except urllib.error.HTTPError as e:
+        error_body = e.read().decode("utf-8", errors="replace")
+        raise RuntimeError(f"ComfyUI rejected workflow (HTTP {e.code}): {error_body[:500]}")
+
     result = json.loads(resp.read())
-    return result.get("prompt_id")
+
+    if "error" in result:
+        raise RuntimeError(f"ComfyUI prompt error: {result['error']}")
+    if "node_errors" in result and result["node_errors"]:
+        raise RuntimeError(f"ComfyUI node errors: {json.dumps(result['node_errors'])[:500]}")
+
+    prompt_id = result.get("prompt_id")
+    if not prompt_id:
+        raise RuntimeError(f"No prompt_id returned: {json.dumps(result)[:300]}")
+
+    return prompt_id
 
 
 def wait_for_completion(prompt_id):
-    """Wait for the workflow to finish via websocket."""
+    """Wait for the workflow to finish via websocket, with timeout."""
     ws_url = f"ws://{COMFY_HOST}/ws?clientId=runpod-worker"
     ws = websocket.WebSocket()
+    ws.settimeout(30)  # 30s per message recv
     ws.connect(ws_url)
+
+    start_time = time.time()
 
     try:
         while True:
-            msg = ws.recv()
+            elapsed = time.time() - start_time
+            if elapsed > COMFY_EXECUTION_TIMEOUT:
+                raise RuntimeError(
+                    f"Workflow execution timed out after {COMFY_EXECUTION_TIMEOUT}s. "
+                    "Check that your workflow has valid output nodes."
+                )
+
+            try:
+                msg = ws.recv()
+            except websocket.WebSocketTimeoutException:
+                continue  # No message in 30s, check timeout and retry
+
             if isinstance(msg, str):
                 data = json.loads(msg)
-                if data.get("type") == "executing":
+                msg_type = data.get("type")
+
+                if msg_type == "executing":
                     exec_data = data.get("data", {})
                     if exec_data.get("node") is None and exec_data.get("prompt_id") == prompt_id:
                         return True
-                elif data.get("type") == "execution_error":
+
+                elif msg_type == "execution_error":
                     error_data = data.get("data", {})
                     raise RuntimeError(f"ComfyUI execution error: {error_data}")
+
+                elif msg_type == "execution_cached":
+                    pass  # Normal, nodes cached
+
+                elif msg_type == "status":
+                    queue_info = data.get("data", {}).get("status", {}).get("exec_info", {})
+                    queue_remaining = queue_info.get("queue_remaining", -1)
+                    if queue_remaining == 0 and (time.time() - start_time) > 10:
+                        # Queue empty but we never got our completion — workflow likely invalid
+                        raise RuntimeError(
+                            "Workflow completed with no output. "
+                            "Check that workflow has SaveImage, SaveAudio, or VHS_VideoCombine nodes."
+                        )
     finally:
         ws.close()
 
