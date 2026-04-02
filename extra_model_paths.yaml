@@ -1,0 +1,24 @@
+# Network Volume model paths
+# This maps to your "ComfyUI Audio" volume (29swi0udsr)
+# mounted at /runpod-volume when attached to a serverless endpoint
+
+runpod_worker_comfy:
+  base_path: /runpod-volume/ComfyUI
+  checkpoints: models/checkpoints/
+  clip: models/clip/
+  clip_vision: models/clip_vision/
+  configs: models/configs/
+  controlnet: models/controlnet/
+  diffusion_models: models/diffusion_models/
+  embeddings: models/embeddings/
+  loras: models/loras/
+  text_encoders: models/text_encoders/
+  upscale_models: models/upscale_models/
+  latent_upscale_models: models/latent_upscale_models/
+  vae: models/vae/
+  unet: models/unet/
+  TTS: models/TTS/
+  stt: models/stt/
+  vibevoice: models/vibevoice/
+  audio_encoders: models/audio_encoders/
+  model_patches: models/model_patches/
