@@ -82,12 +82,18 @@ RUN comfy node install comfyui-whisper || true
 # TTP Toolset (first/middle/last frame control for LTX loops)
 RUN comfy node install comfyui-ttp-toolset || true
 
-# Utility nodes
-RUN comfy node install comfyui-essentials || true
+# Utility nodes — essentials from git (registry version misses newer nodes like FastLaplacianSharpen)
+RUN cd custom_nodes && \
+    git clone https://github.com/cubiq/ComfyUI_essentials.git && \
+    cd ComfyUI_essentials && (pip install -r requirements.txt 2>/dev/null || true)
 RUN comfy node install rgthree-comfy || true
 RUN comfy node install comfymath || true
 RUN comfy node install comfyui-impact-pack || true
 RUN comfy node install comfyui-custom-scripts || true
+# ComfyUI-Easy-Use (cleanGpuUsed, clearCacheAll, ComfySwitchNode)
+RUN cd custom_nodes && \
+    git clone https://github.com/yolain/ComfyUI-Easy-Use.git && \
+    cd ComfyUI-Easy-Use && (pip install -r requirements.txt 2>/dev/null || true)
 
 # VibeVoice + TTS-Audio-Suite — not in registry, install from git
 RUN cd custom_nodes && \
