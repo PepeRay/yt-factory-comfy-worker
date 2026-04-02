@@ -38,10 +38,12 @@ fi
 # Create jobs output directory on network volume
 mkdir -p /runpod-volume/jobs 2>/dev/null || true
 
-# Ensure ComfyUI dependencies are installed (fixes alembic/comfy_aimdo errors)
+# Ensure ComfyUI dependencies are installed (WITHOUT upgrading PyTorch)
 echo "Checking ComfyUI dependencies..."
 cd /comfyui
-pip install -r requirements.txt 2>&1 | tail -5
+grep -v -i -E '^(torch|torchvision|torchaudio|nvidia)' requirements.txt > /tmp/reqs_no_torch.txt
+pip install -r /tmp/reqs_no_torch.txt 2>&1 | tail -5
+rm /tmp/reqs_no_torch.txt
 echo "Dependencies check complete."
 
 # Start ComfyUI in background
