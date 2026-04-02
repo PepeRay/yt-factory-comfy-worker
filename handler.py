@@ -75,13 +75,17 @@ def queue_prompt(workflow_json):
     return prompt_id
 
 
-def wait_for_completion(prompt_id):
-    """Wait for the workflow to finish via websocket, with timeout."""
+def open_websocket():
+    """Open a websocket connection to ComfyUI for monitoring."""
     ws_url = f"ws://{COMFY_HOST}/ws?clientId=runpod-worker"
     ws = websocket.WebSocket()
-    ws.settimeout(30)  # 30s per message recv
+    ws.settimeout(30)
     ws.connect(ws_url)
+    return ws
 
+
+def wait_for_completion(ws, prompt_id):
+    """Wait for the workflow to finish via websocket, with timeout."""
     start_time = time.time()
 
     try:
@@ -96,7 +100,14 @@ def wait_for_completion(prompt_id):
             try:
                 msg = ws.recv()
             except websocket.WebSocketTimeoutException:
-                continue  # No message in 30s, check timeout and retry
+                # No message in 30s — check if prompt is in history (already done)
+                try:
+                    history = get_history(prompt_id)
+                    if prompt_id in history:
+                        return True  # Already completed
+                except Exception:
+                    pass
+                continue
 
             if isinstance(msg, str):
                 data = json.loads(msg)
@@ -113,16 +124,6 @@ def wait_for_completion(prompt_id):
 
                 elif msg_type == "execution_cached":
                     pass  # Normal, nodes cached
-
-                elif msg_type == "status":
-                    queue_info = data.get("data", {}).get("status", {}).get("exec_info", {})
-                    queue_remaining = queue_info.get("queue_remaining", -1)
-                    if queue_remaining == 0 and (time.time() - start_time) > 10:
-                        # Queue empty but we never got our completion — workflow likely invalid
-                        raise RuntimeError(
-                            "Workflow completed with no output. "
-                            "Check that workflow has SaveImage, SaveAudio, or VHS_VideoCombine nodes."
-                        )
     finally:
         ws.close()
 
@@ -320,15 +321,22 @@ def handler(job):
         input_audio=job_input.get("input_audio"),
     )
 
+    # Open websocket BEFORE queuing to avoid missing completion messages
+    try:
+        ws = open_websocket()
+    except Exception as e:
+        return {"error": f"Failed to connect websocket: {str(e)}"}
+
     # Submit workflow
     try:
         prompt_id = queue_prompt(workflow)
     except Exception as e:
+        ws.close()
         return {"error": f"Failed to queue prompt: {str(e)}"}
 
     # Wait for execution
     try:
-        wait_for_completion(prompt_id)
+        wait_for_completion(ws, prompt_id)
     except RuntimeError as e:
         return {"error": f"Execution failed: {str(e)}"}
 
