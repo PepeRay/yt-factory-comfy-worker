@@ -19,6 +19,16 @@ if [ -d "/runpod-volume/ComfyUI" ]; then
                 ln -sf "$node_dir" "/comfyui/custom_nodes/$node_name"
             fi
         done
+
+        # Install Python deps for linked nodes (only if they have requirements.txt)
+        echo "Installing dependencies for linked custom nodes..."
+        for node_dir in /comfyui/custom_nodes/*/; do
+            if [ -L "$node_dir" ] && [ -f "${node_dir}requirements.txt" ]; then
+                node_name=$(basename "$node_dir")
+                echo "  Installing deps: $node_name"
+                pip install -r "${node_dir}requirements.txt" --quiet 2>/dev/null || true
+            fi
+        done
     fi
 
     # Link input files from network volume
