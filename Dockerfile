@@ -52,6 +52,9 @@ RUN /usr/bin/yes | comfy --workspace /comfyui install --version "${COMFYUI_VERSI
 
 WORKDIR /comfyui
 
+# Install ComfyUI's own requirements (alembic, comfy_aimdo, etc.)
+RUN pip install -r requirements.txt
+
 # ── Model paths: Network Volume ─────────────────────────────
 # This tells ComfyUI to also look for models in /runpod-volume
 COPY extra_model_paths.yaml ./
