@@ -69,69 +69,49 @@ COPY extra_model_paths.yaml ./
 # Every node the workflows need must be here with its deps.
 # DO NOT rely on Network Volume for custom nodes.
 
-# --- From Comfy Registry ---
-RUN comfy node install comfyui-gguf || true
-RUN comfy node install comfyui-ltxvideo || true
-RUN comfy node install comfyui-videohelpersuite || true
-RUN comfy node install comfyui-detail-daemon || true
-RUN comfy node install comfyui-kjnodes || true
-RUN comfy node install comfyui-whisper || true
-RUN comfy node install comfyui-ttp-toolset || true
-RUN comfy node install rgthree-comfy || true
-RUN comfy node install comfymath || true
-RUN comfy node install comfyui-impact-pack || true
-RUN comfy node install comfyui-custom-scripts || true
+# --- From Comfy Registry (single layer) ---
+RUN comfy node install comfyui-gguf || true && \
+    comfy node install comfyui-ltxvideo || true && \
+    comfy node install comfyui-videohelpersuite || true && \
+    comfy node install comfyui-detail-daemon || true && \
+    comfy node install comfyui-kjnodes || true && \
+    comfy node install comfyui-whisper || true && \
+    comfy node install comfyui-ttp-toolset || true && \
+    comfy node install rgthree-comfy || true && \
+    comfy node install comfymath || true && \
+    comfy node install comfyui-impact-pack || true && \
+    comfy node install comfyui-custom-scripts || true
 
-# --- From Git (not in registry or need latest version) ---
-# ComfyUI_essentials — registry version is outdated, need FastLaplacianSharpen etc.
-RUN cd custom_nodes && \
-    git clone https://github.com/cubiq/ComfyUI_essentials.git && \
-    cd ComfyUI_essentials && (pip install -r requirements.txt 2>/dev/null || true)
-
-# ComfyUI-Easy-Use — cleanGpuUsed, clearCacheAll, ComfySwitchNode
-RUN cd custom_nodes && \
-    git clone https://github.com/yolain/ComfyUI-Easy-Use.git && \
-    cd ComfyUI-Easy-Use && (pip install -r requirements.txt 2>/dev/null || true)
-
-# --- From Git (may be private — fallback to Network Volume at runtime) ---
-# VibeVoice (TTS)
-RUN cd custom_nodes && \
-    (git clone https://github.com/DualOrion/VibeVoice-ComfyUI.git && \
-     cd VibeVoice-ComfyUI && pip install -r requirements.txt 2>/dev/null) || \
-    echo "WARN: VibeVoice clone failed (private repo?) — will link from Network Volume"
-
-# TTS-Audio-Suite (RVC voice changer)
-RUN cd custom_nodes && \
-    (git clone https://github.com/DualOrion/TTS-Audio-Suite.git && \
-     cd TTS-Audio-Suite && pip install -r requirements.txt 2>/dev/null) || \
-    echo "WARN: TTS-Audio-Suite clone failed — will link from Network Volume"
-
-# RES4LYF (advanced samplers for LTX)
-RUN cd custom_nodes && \
-    (git clone https://github.com/ClownsharkBatwing/RES4LYF.git && \
-     cd RES4LYF && pip install -r requirements.txt 2>/dev/null) || \
-    echo "WARN: RES4LYF clone failed — will link from Network Volume"
-
-# VRGDG nodes (video assembly)
-RUN cd custom_nodes && \
-    git clone https://github.com/vrgamedevgirl/comfyui-vrgamedevgirl.git 2>/dev/null || true
-
-# ControlNet aux
-RUN cd custom_nodes && \
-    (git clone https://github.com/Fannovel16/comfyui_controlnet_aux.git && \
-     cd comfyui_controlnet_aux && pip install -r requirements.txt 2>/dev/null) || true
-
-# WLSH nodes
-RUN cd custom_nodes && \
-    git clone https://github.com/wallish77/wlsh_nodes.git 2>/dev/null || true
+# --- From Git (single layer, each clone is independent) ---
+RUN cd custom_nodes \
+    && git clone https://github.com/cubiq/ComfyUI_essentials.git \
+    && (cd ComfyUI_essentials && pip install -r requirements.txt 2>/dev/null || true) \
+    && git clone https://github.com/yolain/ComfyUI-Easy-Use.git \
+    && (cd ComfyUI-Easy-Use && pip install -r requirements.txt 2>/dev/null || true) \
+    ; cd /comfyui/custom_nodes \
+    && (git clone https://github.com/ClownsharkBatwing/RES4LYF.git \
+        && cd RES4LYF && pip install -r requirements.txt 2>/dev/null || true) \
+    ; cd /comfyui/custom_nodes \
+    && (git clone https://github.com/DualOrion/VibeVoice-ComfyUI.git \
+        && cd VibeVoice-ComfyUI && pip install -r requirements.txt 2>/dev/null \
+        || echo "WARN: VibeVoice clone failed — will link from Network Volume") \
+    ; cd /comfyui/custom_nodes \
+    && (git clone https://github.com/DualOrion/TTS-Audio-Suite.git \
+        && cd TTS-Audio-Suite && pip install -r requirements.txt 2>/dev/null \
+        || echo "WARN: TTS-Audio-Suite clone failed — will link from Network Volume") \
+    ; cd /comfyui/custom_nodes \
+    && (git clone https://github.com/vrgamedevgirl/comfyui-vrgamedevgirl.git 2>/dev/null || true) \
+    && (git clone https://github.com/Fannovel16/comfyui_controlnet_aux.git \
+        && cd comfyui_controlnet_aux && pip install -r requirements.txt 2>/dev/null || true) \
+    ; cd /comfyui/custom_nodes \
+    && (git clone https://github.com/wallish77/wlsh_nodes.git 2>/dev/null || true)
 
 WORKDIR /
 
 # ── Handler ──────────────────────────────────────────────────
 RUN uv pip install runpod requests websocket-client
 
-COPY handler.py ./
-COPY start.sh ./
+COPY handler.py start.sh ./
 RUN chmod +x /start.sh
 
 ENV RUNPOD_NETWORK_VOLUME_PATH="/runpod-volume"
