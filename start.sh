@@ -38,9 +38,14 @@ fi
 # Create jobs output directory on network volume
 mkdir -p /runpod-volume/jobs 2>/dev/null || true
 
+# Ensure ComfyUI dependencies are installed (fixes alembic/comfy_aimdo errors)
+echo "Checking ComfyUI dependencies..."
+cd /comfyui
+pip install -r requirements.txt 2>&1 | tail -5
+echo "Dependencies check complete."
+
 # Start ComfyUI in background
 echo "Launching ComfyUI on port 8188..."
-cd /comfyui
 python main.py --listen 0.0.0.0 --port 8188 --disable-auto-launch &
 
 # Start the RunPod handler
