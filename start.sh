@@ -11,10 +11,16 @@ if [ -d "/runpod-volume/ComfyUI" ]; then
     # Sync custom_nodes from network volume if they exist there
     if [ -d "/runpod-volume/ComfyUI/custom_nodes" ]; then
         echo "Syncing custom nodes from Network Volume..."
-        # Copy nodes that exist on volume but not in container
+        # Network Volume nodes take priority (user's workflows depend on them)
         for node_dir in /runpod-volume/ComfyUI/custom_nodes/*/; do
             node_name=$(basename "$node_dir")
-            if [ ! -d "/comfyui/custom_nodes/$node_name" ]; then
+            if [ "$node_name" = "__pycache__" ]; then continue; fi
+            # Remove container version if exists, replace with volume version
+            if [ -d "/comfyui/custom_nodes/$node_name" ] && [ ! -L "/comfyui/custom_nodes/$node_name" ]; then
+                echo "  Replacing: $node_name (volume version)"
+                rm -rf "/comfyui/custom_nodes/$node_name"
+            fi
+            if [ ! -L "/comfyui/custom_nodes/$node_name" ]; then
                 echo "  Linking: $node_name"
                 ln -sf "$node_dir" "/comfyui/custom_nodes/$node_name"
             fi
