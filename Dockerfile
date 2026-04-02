@@ -93,20 +93,24 @@ RUN cd custom_nodes && \
     git clone https://github.com/yolain/ComfyUI-Easy-Use.git && \
     cd ComfyUI-Easy-Use && (pip install -r requirements.txt 2>/dev/null || true)
 
+# --- From Git (may be private — fallback to Network Volume at runtime) ---
 # VibeVoice (TTS)
 RUN cd custom_nodes && \
-    git clone https://github.com/DualOrion/VibeVoice-ComfyUI.git && \
-    cd VibeVoice-ComfyUI && (pip install -r requirements.txt 2>/dev/null || true)
+    (git clone https://github.com/DualOrion/VibeVoice-ComfyUI.git && \
+     cd VibeVoice-ComfyUI && pip install -r requirements.txt 2>/dev/null) || \
+    echo "WARN: VibeVoice clone failed (private repo?) — will link from Network Volume"
 
 # TTS-Audio-Suite (RVC voice changer)
 RUN cd custom_nodes && \
-    git clone https://github.com/DualOrion/TTS-Audio-Suite.git && \
-    cd TTS-Audio-Suite && (pip install -r requirements.txt 2>/dev/null || true)
+    (git clone https://github.com/DualOrion/TTS-Audio-Suite.git && \
+     cd TTS-Audio-Suite && pip install -r requirements.txt 2>/dev/null) || \
+    echo "WARN: TTS-Audio-Suite clone failed — will link from Network Volume"
 
 # RES4LYF (advanced samplers for LTX)
 RUN cd custom_nodes && \
-    git clone https://github.com/ClownsharkBatwing/RES4LYF.git && \
-    cd RES4LYF && (pip install -r requirements.txt 2>/dev/null || true)
+    (git clone https://github.com/ClownsharkBatwing/RES4LYF.git && \
+     cd RES4LYF && pip install -r requirements.txt 2>/dev/null) || \
+    echo "WARN: RES4LYF clone failed — will link from Network Volume"
 
 # VRGDG nodes (video assembly)
 RUN cd custom_nodes && \
@@ -114,8 +118,8 @@ RUN cd custom_nodes && \
 
 # ControlNet aux
 RUN cd custom_nodes && \
-    git clone https://github.com/Fannovel16/comfyui_controlnet_aux.git && \
-    cd comfyui_controlnet_aux && (pip install -r requirements.txt 2>/dev/null || true)
+    (git clone https://github.com/Fannovel16/comfyui_controlnet_aux.git && \
+     cd comfyui_controlnet_aux && pip install -r requirements.txt 2>/dev/null) || true
 
 # WLSH nodes
 RUN cd custom_nodes && \

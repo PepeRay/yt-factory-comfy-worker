@@ -28,6 +28,23 @@ if [ -d "/runpod-volume/ComfyUI" ]; then
             fi
         done
     fi
+    # ── Fallback: link custom nodes that failed to clone at build time ──
+    # (e.g., private repos like VibeVoice, TTS-Audio-Suite)
+    if [ -d "/runpod-volume/ComfyUI/custom_nodes" ]; then
+        echo "Checking for custom nodes to link from Network Volume..."
+        for node_dir in /runpod-volume/ComfyUI/custom_nodes/*/; do
+            node_name=$(basename "$node_dir")
+            if [ ! -d "/comfyui/custom_nodes/$node_name" ]; then
+                echo "Linking missing node: $node_name"
+                ln -sf "$node_dir" "/comfyui/custom_nodes/$node_name"
+                # Install Python deps if requirements.txt exists
+                if [ -f "$node_dir/requirements.txt" ]; then
+                    echo "Installing deps for $node_name..."
+                    pip install -r "$node_dir/requirements.txt" 2>/dev/null || true
+                fi
+            fi
+        done
+    fi
 else
     echo "WARNING: Network Volume not found at /runpod-volume"
 fi
