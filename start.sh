@@ -2,42 +2,12 @@
 set -e
 
 echo "=== YouTube Factory Serverless Worker ==="
-echo "Starting ComfyUI server..."
 
-# Check if network volume is mounted
+# ── Network Volume: MODELS + INPUTS only ────────────────────
 if [ -d "/runpod-volume/ComfyUI" ]; then
     echo "Network Volume detected at /runpod-volume/ComfyUI"
 
-    # Sync custom_nodes from network volume if they exist there
-    if [ -d "/runpod-volume/ComfyUI/custom_nodes" ]; then
-        echo "Syncing custom nodes from Network Volume..."
-        # Network Volume nodes take priority (user's workflows depend on them)
-        for node_dir in /runpod-volume/ComfyUI/custom_nodes/*/; do
-            node_name=$(basename "$node_dir")
-            if [ "$node_name" = "__pycache__" ]; then continue; fi
-            # Remove container version if exists, replace with volume version
-            if [ -d "/comfyui/custom_nodes/$node_name" ] && [ ! -L "/comfyui/custom_nodes/$node_name" ]; then
-                echo "  Replacing: $node_name (volume version)"
-                rm -rf "/comfyui/custom_nodes/$node_name"
-            fi
-            if [ ! -L "/comfyui/custom_nodes/$node_name" ]; then
-                echo "  Linking: $node_name"
-                ln -sf "$node_dir" "/comfyui/custom_nodes/$node_name"
-            fi
-        done
-
-        # Install Python deps for linked nodes (only if they have requirements.txt)
-        echo "Installing dependencies for linked custom nodes..."
-        for node_dir in /comfyui/custom_nodes/*/; do
-            if [ -L "$node_dir" ] && [ -f "${node_dir}requirements.txt" ]; then
-                node_name=$(basename "$node_dir")
-                echo "  Installing deps: $node_name"
-                pip install -r "${node_dir}requirements.txt" --quiet 2>/dev/null || true
-            fi
-        done
-    fi
-
-    # Link input files from network volume
+    # Link input files (reference voices, images, etc.)
     if [ -d "/runpod-volume/ComfyUI/input" ]; then
         echo "Linking input files from Network Volume..."
         for f in /runpod-volume/ComfyUI/input/*; do
@@ -47,26 +17,32 @@ if [ -d "/runpod-volume/ComfyUI" ]; then
             fi
         done
     fi
+
+    # Link output directory so ComfyUI can read previous outputs
+    if [ -d "/runpod-volume/ComfyUI/output" ]; then
+        echo "Linking output files from Network Volume..."
+        for f in /runpod-volume/ComfyUI/output/*; do
+            fname=$(basename "$f")
+            if [ ! -e "/comfyui/output/$fname" ]; then
+                ln -sf "$f" "/comfyui/output/$fname"
+            fi
+        done
+    fi
 else
     echo "WARNING: Network Volume not found at /runpod-volume"
 fi
 
-# Create jobs output directory on network volume
+# Create jobs output directory
 mkdir -p /runpod-volume/jobs 2>/dev/null || true
 
-# Ensure ComfyUI dependencies are installed (WITHOUT upgrading PyTorch)
-echo "Checking ComfyUI dependencies..."
-cd /comfyui
-grep -v -i -E '^(torch==|torch>=|torch<=|torchvision|torchaudio|nvidia)' requirements.txt > /tmp/reqs_no_torch.txt
-pip install -r /tmp/reqs_no_torch.txt 2>&1 | tail -5
-rm /tmp/reqs_no_torch.txt
-echo "Dependencies check complete."
-
-# Start ComfyUI in background
+# ── Start ComfyUI ───────────────────────────────────────────
 echo "Launching ComfyUI on port 8188..."
+cd /comfyui
 python main.py --listen 0.0.0.0 --port 8188 --disable-auto-launch &
+COMFY_PID=$!
+echo "ComfyUI PID: $COMFY_PID"
 
-# Start the RunPod handler
+# ── Start RunPod Handler ────────────────────────────────────
 echo "Starting RunPod handler..."
 cd /
 python handler.py

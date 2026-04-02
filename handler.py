@@ -1,17 +1,16 @@
 """
 YouTube Factory — ComfyUI Serverless Handler
-Based on blib-la/runpod-worker-comfy, extended for audio + video output.
-
-Camino A: Output files are saved to Network Volume, caller retrieves via S3 API.
-Also supports base64 return for smaller files (SRT, images).
+Based on: runpod-workers/worker-comfyui patterns
+Supports: images, audio, video, text outputs.
 """
 
 import json
 import os
 import time
+import uuid
 import base64
 import urllib.request
-import urllib.parse
+import urllib.error
 import glob as glob_module
 
 import runpod
@@ -20,11 +19,9 @@ import websocket
 COMFY_HOST = "127.0.0.1:8188"
 COMFY_API_AVAILABLE_INTERVAL_MS = int(os.environ.get("COMFY_API_AVAILABLE_INTERVAL_MS", 500))
 COMFY_API_AVAILABLE_MAX_RETRIES = int(os.environ.get("COMFY_API_AVAILABLE_MAX_RETRIES", 0))
-COMFY_POLLING_INTERVAL_MS = int(os.environ.get("COMFY_POLLING_INTERVAL_MS", 250))
-COMFY_EXECUTION_TIMEOUT = int(os.environ.get("COMFY_EXECUTION_TIMEOUT", 300))  # 5 min default
+COMFY_EXECUTION_TIMEOUT = int(os.environ.get("COMFY_EXECUTION_TIMEOUT", 600))  # 10 min default
 NETWORK_VOLUME_PATH = os.environ.get("RUNPOD_NETWORK_VOLUME_PATH", "/runpod-volume")
 
-# Map of ComfyUI output subfolders to check for results
 OUTPUT_DIRS = [
     "/comfyui/output",
     f"{NETWORK_VOLUME_PATH}/ComfyUI/output",
@@ -47,9 +44,9 @@ def wait_for_comfyui():
             time.sleep(COMFY_API_AVAILABLE_INTERVAL_MS / 1000)
 
 
-def queue_prompt(workflow_json):
+def queue_prompt(workflow_json, client_id):
     """Submit a workflow to ComfyUI and return the prompt_id."""
-    data = json.dumps({"prompt": workflow_json}).encode("utf-8")
+    data = json.dumps({"prompt": workflow_json, "client_id": client_id}).encode("utf-8")
     req = urllib.request.Request(
         f"http://{COMFY_HOST}/prompt",
         data=data,
@@ -75,57 +72,54 @@ def queue_prompt(workflow_json):
     return prompt_id
 
 
-def open_websocket():
-    """Open a websocket connection to ComfyUI for monitoring."""
-    ws_url = f"ws://{COMFY_HOST}/ws?clientId=runpod-worker"
-    ws = websocket.WebSocket()
-    ws.settimeout(30)
-    ws.connect(ws_url)
-    return ws
-
-
 def wait_for_completion(ws, prompt_id):
-    """Wait for the workflow to finish via websocket, with timeout."""
+    """
+    Wait for workflow to finish via websocket.
+    WS must be connected BEFORE calling queue_prompt.
+    """
     start_time = time.time()
 
-    try:
-        while True:
-            elapsed = time.time() - start_time
-            if elapsed > COMFY_EXECUTION_TIMEOUT:
-                raise RuntimeError(
-                    f"Workflow execution timed out after {COMFY_EXECUTION_TIMEOUT}s. "
-                    "Check that your workflow has valid output nodes."
-                )
+    while True:
+        elapsed = time.time() - start_time
+        if elapsed > COMFY_EXECUTION_TIMEOUT:
+            raise RuntimeError(
+                f"Workflow execution timed out after {COMFY_EXECUTION_TIMEOUT}s."
+            )
 
+        try:
+            msg = ws.recv()
+        except websocket.WebSocketTimeoutException:
+            # Check if prompt already finished (fallback)
             try:
-                msg = ws.recv()
-            except websocket.WebSocketTimeoutException:
-                # No message in 30s — check if prompt is in history (already done)
-                try:
-                    history = get_history(prompt_id)
-                    if prompt_id in history:
-                        return True  # Already completed
-                except Exception:
-                    pass
-                continue
+                history = get_history(prompt_id)
+                if prompt_id in history:
+                    return True
+            except Exception:
+                pass
+            continue
+        except websocket.WebSocketConnectionClosedException:
+            # Connection lost — check history as fallback
+            try:
+                history = get_history(prompt_id)
+                if prompt_id in history:
+                    return True
+            except Exception:
+                pass
+            raise RuntimeError("WebSocket connection closed unexpectedly")
 
-            if isinstance(msg, str):
-                data = json.loads(msg)
-                msg_type = data.get("type")
+        if isinstance(msg, str):
+            data = json.loads(msg)
+            msg_type = data.get("type")
 
-                if msg_type == "executing":
-                    exec_data = data.get("data", {})
-                    if exec_data.get("node") is None and exec_data.get("prompt_id") == prompt_id:
-                        return True
+            if msg_type == "executing":
+                exec_data = data.get("data", {})
+                if exec_data.get("node") is None and exec_data.get("prompt_id") == prompt_id:
+                    return True
 
-                elif msg_type == "execution_error":
-                    error_data = data.get("data", {})
+            elif msg_type == "execution_error":
+                error_data = data.get("data", {})
+                if error_data.get("prompt_id") == prompt_id:
                     raise RuntimeError(f"ComfyUI execution error: {error_data}")
-
-                elif msg_type == "execution_cached":
-                    pass  # Normal, nodes cached
-    finally:
-        ws.close()
 
 
 def get_history(prompt_id):
@@ -136,10 +130,7 @@ def get_history(prompt_id):
 
 
 def collect_outputs(prompt_id):
-    """
-    Collect ALL outputs from ComfyUI execution — images, audio, video, text.
-    Returns a dict with categorized results.
-    """
+    """Collect ALL outputs from ComfyUI — images, audio, video, text."""
     history = get_history(prompt_id)
     prompt_history = history.get(prompt_id, {})
     outputs = prompt_history.get("outputs", {})
@@ -149,11 +140,9 @@ def collect_outputs(prompt_id):
         "audio": [],
         "video": [],
         "text": [],
-        "files": [],
     }
 
     for node_id, node_output in outputs.items():
-        # Handle images
         if "images" in node_output:
             for img in node_output["images"]:
                 if img.get("type") == "temp":
@@ -167,22 +156,19 @@ def collect_outputs(prompt_id):
                         "base64": encode_file_base64(file_path),
                     })
 
-        # Handle audio (VHS, VibeVoice, etc.)
         if "audio" in node_output:
             for aud in node_output["audio"]:
                 file_path = find_output_file(aud.get("filename"), aud.get("subfolder", ""))
                 if file_path:
-                    ext = os.path.splitext(aud["filename"])[1].lower()
+                    file_size = os.path.getsize(file_path)
                     results["audio"].append({
                         "filename": aud["filename"],
                         "node_id": node_id,
                         "path": file_path,
-                        "size_mb": round(os.path.getsize(file_path) / 1024 / 1024, 2),
-                        # Only base64 for small audio (<10MB)
-                        "base64": encode_file_base64(file_path) if os.path.getsize(file_path) < 10 * 1024 * 1024 else None,
+                        "size_mb": round(file_size / 1024 / 1024, 2),
+                        "base64": encode_file_base64(file_path) if file_size < 10 * 1024 * 1024 else None,
                     })
 
-        # Handle video/gifs (VHS_VideoCombine output)
         if "gifs" in node_output:
             for vid in node_output["gifs"]:
                 file_path = find_output_file(vid.get("filename"), vid.get("subfolder", ""))
@@ -192,32 +178,13 @@ def collect_outputs(prompt_id):
                         "node_id": node_id,
                         "path": file_path,
                         "size_mb": round(os.path.getsize(file_path) / 1024 / 1024, 2),
-                        # Video files are too large for base64, use S3 path
-                        "network_volume_path": file_path if file_path.startswith(NETWORK_VOLUME_PATH) else None,
                     })
 
-        # Handle text output (SRT from Whisper, etc.)
         if "text" in node_output:
             for txt_item in node_output["text"]:
-                if isinstance(txt_item, str):
-                    results["text"].append({
-                        "content": txt_item,
-                        "node_id": node_id,
-                    })
-                elif isinstance(txt_item, dict):
-                    results["text"].append({
-                        "content": txt_item,
-                        "node_id": node_id,
-                    })
-
-        # Handle any other output types
-        known_keys = {"images", "audio", "gifs", "text"}
-        for key in node_output:
-            if key not in known_keys:
-                results["files"].append({
-                    "type": key,
+                results["text"].append({
+                    "content": txt_item,
                     "node_id": node_id,
-                    "data": str(node_output[key])[:500],
                 })
 
     return results
@@ -231,7 +198,6 @@ def find_output_file(filename, subfolder=""):
         candidate = os.path.join(output_dir, subfolder, filename)
         if os.path.exists(candidate):
             return candidate
-    # Fallback: glob search
     for output_dir in OUTPUT_DIRS:
         pattern = os.path.join(output_dir, "**", filename)
         matches = glob_module.glob(pattern, recursive=True)
@@ -250,11 +216,7 @@ def encode_file_base64(file_path):
 
 
 def copy_to_network_volume(file_path, job_id, category="output"):
-    """
-    Copy output file to a structured location on the Network Volume.
-    This makes it retrievable via S3 API.
-    Returns the path on the network volume.
-    """
+    """Copy output to Network Volume for S3 retrieval."""
     if not os.path.exists(NETWORK_VOLUME_PATH):
         return None
 
@@ -264,7 +226,6 @@ def copy_to_network_volume(file_path, job_id, category="output"):
     filename = os.path.basename(file_path)
     dest_path = os.path.join(dest_dir, filename)
 
-    # Only copy if not already on the network volume
     if not file_path.startswith(NETWORK_VOLUME_PATH):
         import shutil
         shutil.copy2(file_path, dest_path)
@@ -272,34 +233,23 @@ def copy_to_network_volume(file_path, job_id, category="output"):
     return dest_path
 
 
-def inject_inputs(workflow, input_images=None, input_audio=None):
-    """
-    Inject base64-encoded input files into ComfyUI's input folder.
-    Used when n8n sends images/audio as part of the request.
-    """
+def inject_inputs(input_images=None, input_audio=None):
+    """Inject base64-encoded input files into ComfyUI's input folder."""
     if input_images:
-        for img_name, img_b64 in input_images.items():
-            save_path = os.path.join("/comfyui/input", img_name)
-            with open(save_path, "wb") as f:
-                f.write(base64.b64decode(img_b64))
+        for name, b64 in input_images.items():
+            with open(os.path.join("/comfyui/input", name), "wb") as f:
+                f.write(base64.b64decode(b64))
 
     if input_audio:
-        for aud_name, aud_b64 in input_audio.items():
-            save_path = os.path.join("/comfyui/input", aud_name)
-            with open(save_path, "wb") as f:
-                f.write(base64.b64decode(aud_b64))
+        for name, b64 in input_audio.items():
+            with open(os.path.join("/comfyui/input", name), "wb") as f:
+                f.write(base64.b64decode(b64))
 
 
 def handler(job):
     """
     RunPod Serverless handler.
-
-    Expected input format:
-    {
-        "workflow": { ... ComfyUI workflow JSON ... },
-        "input_images": { "name.png": "<base64>" },  // optional
-        "input_audio": { "voice.wav": "<base64>" },   // optional
-    }
+    Pattern: connect WS → queue prompt → wait for completion → collect outputs.
     """
     job_input = job.get("input", {})
     job_id = job.get("id", "unknown")
@@ -316,43 +266,46 @@ def handler(job):
 
     # Inject input files if provided
     inject_inputs(
-        workflow,
         input_images=job_input.get("input_images"),
         input_audio=job_input.get("input_audio"),
     )
 
-    # Open websocket BEFORE queuing to avoid missing completion messages
+    # Step 1: Connect WebSocket FIRST (before queuing)
+    client_id = str(uuid.uuid4())
+    ws_url = f"ws://{COMFY_HOST}/ws?clientId={client_id}"
     try:
-        ws = open_websocket()
+        ws = websocket.WebSocket()
+        ws.settimeout(30)
+        ws.connect(ws_url)
     except Exception as e:
         return {"error": f"Failed to connect websocket: {str(e)}"}
 
-    # Submit workflow
+    # Step 2: Queue workflow (with same client_id)
     try:
-        prompt_id = queue_prompt(workflow)
+        prompt_id = queue_prompt(workflow, client_id)
     except Exception as e:
         ws.close()
         return {"error": f"Failed to queue prompt: {str(e)}"}
 
-    # Wait for execution
+    # Step 3: Wait for completion
     try:
         wait_for_completion(ws, prompt_id)
     except RuntimeError as e:
         return {"error": f"Execution failed: {str(e)}"}
+    finally:
+        ws.close()
 
-    # Collect all outputs
+    # Step 4: Collect outputs
     results = collect_outputs(prompt_id)
 
-    # Copy outputs to Network Volume for S3 retrieval
+    # Copy to Network Volume for S3 retrieval
     for category in ["images", "audio", "video"]:
         for item in results[category]:
             if item.get("path"):
                 nv_path = copy_to_network_volume(item["path"], job_id, category)
                 if nv_path:
-                    # Store the S3-accessible path (relative to volume root)
                     item["s3_key"] = nv_path.replace(NETWORK_VOLUME_PATH + "/", "")
 
-    # Summary for logging
     summary = {
         "images": len(results["images"]),
         "audio": len(results["audio"]),
@@ -367,5 +320,4 @@ def handler(job):
     }
 
 
-# Start the serverless worker
 runpod.serverless.start({"handler": handler})
