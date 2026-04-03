@@ -198,15 +198,19 @@ RUN cd /comfyui \
     && rm /tmp/comfy_reqs_final.txt \
     && echo "=== ComfyUI deps restored ==="
 
-# Packages NOT in requirements.txt but required by ComfyUI at runtime.
-# comfy_aimdo: VRAM allocator, imported by main.py line 32
-# torchsde: SDE samplers, imported by comfy/k_diffusion/sampling.py line 7
-# Both get removed by --force-reinstall of PyTorch.
-RUN uv pip install comfy-aimdo torchsde \
-    && echo "=== comfy-aimdo + torchsde installed ==="
+# Packages required by ComfyUI at runtime that get removed or skipped
+# by --force-reinstall of PyTorch, or that uv considers "satisfied"
+# but are actually missing. Each one has caused a startup crash.
+#   comfy-aimdo: VRAM allocator (main.py:32) — NOT in requirements.txt
+#   torchsde: SDE samplers (comfy/k_diffusion/sampling.py:7) — removed by force-reinstall
+#   comfyui-frontend-package: web server frontend — FATAL without it, server won't start
+#   comfy-kitchen: fp8/fp4 optimized kernels — warning without it but recommended
+#   blake3: fast hashing — warning without it
+RUN uv pip install comfy-aimdo torchsde comfyui-frontend-package comfy-kitchen blake3 \
+    && echo "=== explicit runtime deps installed ==="
 
 # ── Verify environment integrity ────────────────────────────
-# Every package here has caused a startup crash in the past.
+# Every package here has caused a startup crash or warning.
 # If any import fails, the build fails — preventing broken deploys.
 RUN python -c "\
 import torch; \
@@ -221,6 +225,7 @@ import av; \
 import PIL; \
 import transformers; \
 import pydantic; \
+import blake3; \
 print(f'torch={torch.__version__}, numpy={numpy.__version__}'); \
 print(f'torchvision={torchvision.__version__}, torchaudio={torchaudio.__version__}'); \
 print('=== Environment verified ===')"
