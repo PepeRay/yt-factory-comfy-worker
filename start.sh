@@ -16,6 +16,24 @@ WHITELIST_NODES=(
 if [ -d "/runpod-volume/ComfyUI" ]; then
     echo "Network Volume detected at /runpod-volume/ComfyUI"
 
+    # Link ALL model subdirectories from Network Volume into /comfyui/models/
+    # Some nodes (e.g., VibeVoice) discover models relative to checkpoints dir,
+    # bypassing extra_model_paths.yaml. Symlinks ensure all models are found.
+    if [ -d "/runpod-volume/ComfyUI/models" ]; then
+        echo "Linking model directories from Network Volume..."
+        for src in /runpod-volume/ComfyUI/models/*/; do
+            [ -d "$src" ] || continue
+            dir_name=$(basename "$src")
+            dst="/comfyui/models/$dir_name"
+            if [ ! -e "$dst" ]; then
+                ln -sf "$src" "$dst"
+                echo "  ✓ Linked: $dir_name"
+            else
+                echo "  ● Exists: $dir_name"
+            fi
+        done
+    fi
+
     # Link input files (reference voices, images, etc.)
     if [ -d "/runpod-volume/ComfyUI/input" ]; then
         echo "Linking input files from Network Volume..."
