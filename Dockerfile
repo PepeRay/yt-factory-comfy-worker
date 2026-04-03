@@ -198,16 +198,19 @@ RUN cd /comfyui \
     && rm /tmp/comfy_reqs_final.txt \
     && echo "=== ComfyUI deps restored ==="
 
-# comfy_aimdo is NOT in requirements.txt but main.py imports it.
-# It's a separate VRAM allocator package. Must be installed explicitly.
-RUN uv pip install comfy-aimdo \
-    && echo "=== comfy-aimdo installed ==="
+# Packages NOT in requirements.txt but required by ComfyUI at runtime.
+# comfy_aimdo: VRAM allocator, imported by main.py line 32
+# torchsde: SDE samplers, imported by comfy/k_diffusion/sampling.py line 7
+# Both get removed by --force-reinstall of PyTorch.
+RUN uv pip install comfy-aimdo torchsde \
+    && echo "=== comfy-aimdo + torchsde installed ==="
 
 # ── Verify environment integrity ────────────────────────────
 RUN python -c "\
 import torch; \
 import numpy; \
 import comfy_aimdo; \
+import torchsde; \
 import alembic; \
 print(f'torch={torch.__version__}, numpy={numpy.__version__}'); \
 print('=== Environment verified ===')"
