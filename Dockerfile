@@ -198,6 +198,20 @@ RUN cd /comfyui \
     && rm /tmp/comfy_reqs_final.txt \
     && echo "=== ComfyUI deps restored ==="
 
+# comfy_aimdo is NOT in requirements.txt but main.py imports it.
+# It's a separate VRAM allocator package. Must be installed explicitly.
+RUN uv pip install comfy-aimdo \
+    && echo "=== comfy-aimdo installed ==="
+
+# ── Verify environment integrity ────────────────────────────
+RUN python -c "\
+import torch; \
+import numpy; \
+import comfy_aimdo; \
+import alembic; \
+print(f'torch={torch.__version__}, numpy={numpy.__version__}'); \
+print('=== Environment verified ===')"
+
 # ── Handler ──────────────────────────────────────────────────
 RUN uv pip install runpod requests websocket-client
 
