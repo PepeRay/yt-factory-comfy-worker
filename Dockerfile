@@ -89,9 +89,6 @@ RUN cd custom_nodes \
     && git clone https://github.com/yolain/ComfyUI-Easy-Use.git \
     && (cd ComfyUI-Easy-Use && pip install -r requirements.txt 2>/dev/null || true) \
     ; cd /comfyui/custom_nodes \
-    && (git clone https://github.com/ClownsharkBatwing/RES4LYF.git \
-        && cd RES4LYF && pip install -r requirements.txt 2>/dev/null || true) \
-    ; cd /comfyui/custom_nodes \
     && (git clone https://github.com/DualOrion/VibeVoice-ComfyUI.git \
         && cd VibeVoice-ComfyUI && pip install -r requirements.txt 2>/dev/null \
         || echo "WARN: VibeVoice clone failed — will link from Network Volume") \
