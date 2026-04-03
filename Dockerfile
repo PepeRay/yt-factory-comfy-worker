@@ -206,13 +206,23 @@ RUN uv pip install comfy-aimdo torchsde \
     && echo "=== comfy-aimdo + torchsde installed ==="
 
 # ── Verify environment integrity ────────────────────────────
+# Every package here has caused a startup crash in the past.
+# If any import fails, the build fails — preventing broken deploys.
 RUN python -c "\
 import torch; \
+import torchvision; \
+import torchaudio; \
 import numpy; \
 import comfy_aimdo; \
 import torchsde; \
 import alembic; \
+import kornia; \
+import av; \
+import PIL; \
+import transformers; \
+import pydantic; \
 print(f'torch={torch.__version__}, numpy={numpy.__version__}'); \
+print(f'torchvision={torchvision.__version__}, torchaudio={torchaudio.__version__}'); \
 print('=== Environment verified ===')"
 
 # ── Handler ──────────────────────────────────────────────────
