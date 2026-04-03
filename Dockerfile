@@ -187,6 +187,17 @@ RUN uv pip install --force-reinstall \
     && uv pip install --force-reinstall numpy \
     && echo "=== PyTorch + numpy restored ==="
 
+# ── Re-install ComfyUI deps broken by force-reinstall ───────
+# The force-reinstall of PyTorch can uninstall packages that
+# depended on the old torch version (e.g., comfy_aimdo).
+# Re-run requirements.txt (minus torch lines) to restore them.
+RUN cd /comfyui \
+    && grep -v -i -E '^(torch==|torch>=|torch<=|torchvision|torchaudio|nvidia)' requirements.txt \
+       > /tmp/comfy_reqs_final.txt \
+    && uv pip install -r /tmp/comfy_reqs_final.txt \
+    && rm /tmp/comfy_reqs_final.txt \
+    && echo "=== ComfyUI deps restored ==="
+
 # ── Handler ──────────────────────────────────────────────────
 RUN uv pip install runpod requests websocket-client
 
