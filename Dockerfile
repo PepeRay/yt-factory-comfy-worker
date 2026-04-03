@@ -97,6 +97,9 @@ RUN cd custom_nodes \
         && cd TTS-Audio-Suite && pip install -r requirements.txt 2>/dev/null \
         || echo "WARN: TTS-Audio-Suite clone failed — will link from Network Volume") \
     ; cd /comfyui/custom_nodes \
+    && (git clone https://github.com/TTPlanetPig/Comfyui_TTP_Toolset.git \
+        && cd Comfyui_TTP_Toolset && pip install -r requirements.txt 2>/dev/null || true) \
+    ; cd /comfyui/custom_nodes \
     && (git clone https://github.com/vrgamedevgirl/comfyui-vrgamedevgirl.git 2>/dev/null || true) \
     && (git clone https://github.com/Fannovel16/comfyui_controlnet_aux.git \
         && cd comfyui_controlnet_aux && pip install -r requirements.txt 2>/dev/null || true) \
@@ -207,7 +210,8 @@ RUN cd /comfyui \
 #   comfyui-frontend-package: web server frontend — FATAL without it, server won't start
 #   comfy-kitchen: fp8/fp4 optimized kernels — warning without it but recommended
 #   blake3: fast hashing — warning without it
-RUN uv pip install comfy-aimdo torchsde comfyui-frontend-package comfy-kitchen blake3 \
+#   simpleeval: required by MathExpression|pysssss nodes (comfyui-custom-scripts)
+RUN uv pip install comfy-aimdo torchsde comfyui-frontend-package comfy-kitchen blake3 simpleeval \
     && echo "=== explicit runtime deps installed ==="
 
 # ── Verify environment integrity ────────────────────────────
