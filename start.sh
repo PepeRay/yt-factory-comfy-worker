@@ -48,11 +48,9 @@ if [ -d "/runpod-volume/ComfyUI" ]; then
             if [ -d "$node_dir" ] && [ ! -d "/comfyui/custom_nodes/$node_name" ]; then
                 echo "  ✓ Linking: $node_name"
                 ln -sf "$node_dir" "/comfyui/custom_nodes/$node_name"
-                # Install deps with --no-deps to avoid cascading downgrades
-                if [ -f "$node_dir/requirements.txt" ]; then
-                    echo "  Installing deps for $node_name (no-deps mode)..."
-                    pip install --no-deps -r "$node_dir/requirements.txt" 2>/dev/null || true
-                fi
+                # DO NOT run pip install here — deps are pre-installed in the
+                # Docker image. Runtime pip installs destroy the Python env
+                # by downgrading numpy, transformers, protobuf, etc.
             elif [ -d "/comfyui/custom_nodes/$node_name" ]; then
                 echo "  ● Already in image: $node_name"
             else

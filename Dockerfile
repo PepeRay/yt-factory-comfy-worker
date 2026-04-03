@@ -105,17 +105,87 @@ RUN cd custom_nodes \
 
 WORKDIR /
 
-# ── Ensure critical Python deps survive all installs ─────────
-# comfy node install sometimes fails to install these, or they
-# get clobbered by conflicting requirements from git-cloned nodes.
-# This layer runs LAST before handler to guarantee they exist.
+# ── Pre-install deps for Network Volume nodes ──────────────
+# VibeVoice-ComfyUI, TTS-Audio-Suite, and RES4LYF are linked
+# from Network Volume at runtime. Their Python deps MUST be
+# installed here — NEVER at runtime (pip destroys the env).
+#
+# CRITICAL: Do NOT install numpy or transformers with version
+# pins here. The nodes want numpy<2.3 and transformers<=4.57
+# but our PyTorch cu126 needs numpy>=2.4. The nodes work fine
+# with newer versions — the pins are overly conservative.
+
+# Layer 1: Core audio/ML deps (VibeVoice + TTS-Audio-Suite)
 RUN uv pip install \
+    accelerate \
+    diffusers \
+    peft \
+    datasets \
+    scipy \
+    librosa \
+    soundfile \
+    sounddevice \
+    av \
+    aiortc \
+    bitsandbytes \
+    ml-collections \
+    absl-py \
+    omegaconf \
+    dacite \
+    conformer \
+    x-transformers \
+    torchdiffeq \
+    ema-pytorch \
+    vocos \
+    echo-tts \
+    monotonic-alignment-search \
+    && echo "=== Audio/ML deps installed ==="
+
+# Layer 2: TTS-Audio-Suite specific deps
+RUN uv pip install \
+    jieba \
+    pypinyin \
+    unidecode \
+    phonemizer \
+    cn2an \
+    g2p-en \
+    inflect \
+    sentencepiece \
+    textstat \
+    punctuators \
+    funasr \
+    nagisa \
+    hyperpyyaml \
+    modelscope \
+    munch \
+    json5 \
+    faiss-cpu \
+    praat-parselmouth \
+    pyworld \
+    torchfcpe \
+    wandb \
+    keras \
+    && echo "=== TTS deps installed ==="
+
+# Layer 3: RES4LYF deps + critical deps that get clobbered
+RUN uv pip install \
+    opencv-python \
+    matplotlib \
+    pywavelets \
     alembic \
     gguf \
     openai-whisper \
     piexif \
     aiohttp \
-    && echo "=== Critical deps verified ==="
+    && echo "=== RES4LYF + critical deps installed ==="
+
+# ── Restore critical packages to correct versions ───────────
+# Git-cloned nodes may have downgraded these during build.
+# This MUST run after all pip installs to guarantee correct env.
+RUN uv pip install --force-reinstall \
+    torch torchvision torchaudio --index-url https://download.pytorch.org/whl/cu126 \
+    && uv pip install --force-reinstall numpy \
+    && echo "=== PyTorch + numpy restored ==="
 
 # ── Handler ──────────────────────────────────────────────────
 RUN uv pip install runpod requests websocket-client
