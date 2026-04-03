@@ -110,13 +110,14 @@ WORKDIR /
 # from Network Volume at runtime. Their Python deps MUST be
 # installed here — NEVER at runtime (pip destroys the env).
 #
-# CRITICAL: Do NOT install numpy or transformers with version
-# pins here. The nodes want numpy<2.3 and transformers<=4.57
-# but our PyTorch cu126 needs numpy>=2.4. The nodes work fine
-# with newer versions — the pins are overly conservative.
+# CRITICAL: numpy must stay >=2.4 (PyTorch cu126 needs it).
+# transformers MUST be <5.0: VibeVoice's auto_register config
+# classes crash with transformers 5.x ("already used by a
+# Transformers model" error on VibeVoiceAcousticTokenizerConfig).
 
 # Layer 1: Core audio/ML deps (VibeVoice + TTS-Audio-Suite)
 RUN uv pip install \
+    "transformers>=4.40,<5.0" \
     accelerate \
     diffusers \
     peft \
