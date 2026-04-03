@@ -3,6 +3,15 @@ set -e
 
 echo "=== YouTube Factory Serverless Worker ==="
 
+# ── WHITELIST: Only these nodes get linked from Network Volume ──
+# Private repos that can't clone at build time, or repos too large to clone.
+# NEVER link everything — random nodes destroy the container's Python env.
+WHITELIST_NODES=(
+    "VibeVoice-ComfyUI"
+    "TTS-Audio-Suite"
+    "RES4LYF"
+)
+
 # ── Network Volume: MODELS + INPUTS only ────────────────────
 if [ -d "/runpod-volume/ComfyUI" ]; then
     echo "Network Volume detected at /runpod-volume/ComfyUI"
@@ -11,6 +20,7 @@ if [ -d "/runpod-volume/ComfyUI" ]; then
     if [ -d "/runpod-volume/ComfyUI/input" ]; then
         echo "Linking input files from Network Volume..."
         for f in /runpod-volume/ComfyUI/input/*; do
+            [ -e "$f" ] || continue
             fname=$(basename "$f")
             if [ ! -e "/comfyui/input/$fname" ]; then
                 ln -sf "$f" "/comfyui/input/$fname"
@@ -22,26 +32,31 @@ if [ -d "/runpod-volume/ComfyUI" ]; then
     if [ -d "/runpod-volume/ComfyUI/output" ]; then
         echo "Linking output files from Network Volume..."
         for f in /runpod-volume/ComfyUI/output/*; do
+            [ -e "$f" ] || continue
             fname=$(basename "$f")
             if [ ! -e "/comfyui/output/$fname" ]; then
                 ln -sf "$f" "/comfyui/output/$fname"
             fi
         done
     fi
-    # ── Fallback: link custom nodes that failed to clone at build time ──
-    # (e.g., private repos like VibeVoice, TTS-Audio-Suite)
+
+    # ── Whitelist-only: link SPECIFIC custom nodes from Network Volume ──
     if [ -d "/runpod-volume/ComfyUI/custom_nodes" ]; then
-        echo "Checking for custom nodes to link from Network Volume..."
-        for node_dir in /runpod-volume/ComfyUI/custom_nodes/*/; do
-            node_name=$(basename "$node_dir")
-            if [ ! -d "/comfyui/custom_nodes/$node_name" ]; then
-                echo "Linking missing node: $node_name"
+        echo "Linking whitelisted custom nodes from Network Volume..."
+        for node_name in "${WHITELIST_NODES[@]}"; do
+            node_dir="/runpod-volume/ComfyUI/custom_nodes/$node_name"
+            if [ -d "$node_dir" ] && [ ! -d "/comfyui/custom_nodes/$node_name" ]; then
+                echo "  ✓ Linking: $node_name"
                 ln -sf "$node_dir" "/comfyui/custom_nodes/$node_name"
-                # Install Python deps if requirements.txt exists
+                # Install deps with --no-deps to avoid cascading downgrades
                 if [ -f "$node_dir/requirements.txt" ]; then
-                    echo "Installing deps for $node_name..."
-                    pip install -r "$node_dir/requirements.txt" 2>/dev/null || true
+                    echo "  Installing deps for $node_name (no-deps mode)..."
+                    pip install --no-deps -r "$node_dir/requirements.txt" 2>/dev/null || true
                 fi
+            elif [ -d "/comfyui/custom_nodes/$node_name" ]; then
+                echo "  ● Already in image: $node_name"
+            else
+                echo "  ✗ Not found on Network Volume: $node_name"
             fi
         done
     fi

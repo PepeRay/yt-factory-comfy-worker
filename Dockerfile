@@ -105,6 +105,18 @@ RUN cd custom_nodes \
 
 WORKDIR /
 
+# ── Ensure critical Python deps survive all installs ─────────
+# comfy node install sometimes fails to install these, or they
+# get clobbered by conflicting requirements from git-cloned nodes.
+# This layer runs LAST before handler to guarantee they exist.
+RUN uv pip install \
+    alembic \
+    gguf \
+    openai-whisper \
+    piexif \
+    aiohttp \
+    && echo "=== Critical deps verified ==="
+
 # ── Handler ──────────────────────────────────────────────────
 RUN uv pip install runpod requests websocket-client
 
