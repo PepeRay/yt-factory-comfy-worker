@@ -1,0 +1,62 @@
+{
+  "595": {
+    "inputs": {
+      "filename_prefix": "audio/Dominion/ComfyUI",
+      "audioUI": "",
+      "audio": [
+        "650",
+        0
+      ]
+    },
+    "class_type": "SaveAudio",
+    "_meta": {
+      "title": "SaveAudio VibeVoice"
+    }
+  },
+  "596": {
+    "inputs": {
+      "audio": "Voz_Dominion.wav",
+      "audioUI": "/api/view?filename=Voz_Dominion.wav&type=input&subfolder=&rand=0.48991081207516285"
+    },
+    "class_type": "LoadAudio",
+    "_meta": {
+      "title": "Load Audio"
+    }
+  },
+  "610": {
+    "inputs": {
+      "value": "\"So is there a clean exit? \" Here is the false exit list: Stricter rules. [pause:100] It's good until risk migrates. Bigger hoses. Useful until politics balk. Let it burn. Brave until pensions melt and businesses miss payroll. [pause:100] Nationalize the dark. Impossible the dark is everywhere, by design. [pause:100] False exits aren't exits. They are detours back to the same turn. [pause:100] The real answer isn't romantic. It's transparency over theater. Measure leverage in funds, not just banks."
+    },
+    "class_type": "PrimitiveStringMultiline",
+    "_meta": {
+      "title": "String (Multiline)"
+    }
+  },
+  "650": {
+    "inputs": {
+      "text": [
+        "610",
+        0
+      ],
+      "model": "VibeVoice-Large",
+      "attention_type": "sdpa",
+      "quantize_llm": "full precision",
+      "free_memory_after_generate": true,
+      "diffusion_steps": 30,
+      "seed": 2538721887,
+      "cfg_scale": 1.36,
+      "use_sampling": false,
+      "temperature": 0.6,
+      "top_p": 0.8,
+      "voice_speed_factor": 1,
+      "speaker1_voice": [
+        "596",
+        0
+      ]
+    },
+    "class_type": "VibeVoiceMultipleSpeakersNode",
+    "_meta": {
+      "title": "VibeVoice Multiple Speakers"
+    }
+  }
+}

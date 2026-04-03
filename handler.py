@@ -1,14 +1,17 @@
 """
-YouTube Factory — ComfyUI Serverless Handler
-Based on: runpod-workers/worker-comfyui patterns
-Supports: images, audio, video, text outputs.
+YouTube Factory — ComfyUI Serverless Handler v2
+Organized output on Network Volume, path-based (no base64).
+
+Job types: txt-img, txt-voice, voice-srt, img-vid, compose
+Output structure: /runpod-volume/projects/{channel}/{content}/source/{type}/
 """
 
 import json
 import os
 import time
 import uuid
-import base64
+import subprocess
+import shutil
 import urllib.request
 import urllib.error
 import glob as glob_module
@@ -18,16 +21,45 @@ import websocket
 
 COMFY_HOST = "127.0.0.1:8188"
 COMFY_API_AVAILABLE_INTERVAL_MS = int(os.environ.get("COMFY_API_AVAILABLE_INTERVAL_MS", 500))
-COMFY_API_AVAILABLE_MAX_RETRIES = int(os.environ.get("COMFY_API_AVAILABLE_MAX_RETRIES", 240))  # 240 * 500ms = 120s max
-COMFY_EXECUTION_TIMEOUT = int(os.environ.get("COMFY_EXECUTION_TIMEOUT", 600))  # 10 min default
+COMFY_API_AVAILABLE_MAX_RETRIES = int(os.environ.get("COMFY_API_AVAILABLE_MAX_RETRIES", 240))
+COMFY_EXECUTION_TIMEOUT = int(os.environ.get("COMFY_EXECUTION_TIMEOUT", 600))
 NETWORK_VOLUME_PATH = os.environ.get("RUNPOD_NETWORK_VOLUME_PATH", "/runpod-volume")
+PROJECTS_ROOT = os.path.join(NETWORK_VOLUME_PATH, "projects")
 
+# Directories where ComfyUI writes outputs
 OUTPUT_DIRS = [
     "/comfyui/output",
     f"{NETWORK_VOLUME_PATH}/ComfyUI/output",
     "/comfyui/temp",
 ]
 
+# Map job_type → output subfolder under source/
+JOB_TYPE_OUTPUT = {
+    "txt-img": "images",
+    "txt-voice": "audio",
+    "voice-srt": "srt",
+    "img-vid": "video",
+}
+
+
+# ── Helpers ─────────────────────────────────────────────────
+
+def project_dir(channel, content_id):
+    """Return the base project directory for a channel + content."""
+    return os.path.join(PROJECTS_ROOT, channel, content_id)
+
+
+def source_dir(channel, content_id, media_type):
+    """Return the source directory for a specific media type."""
+    return os.path.join(project_dir(channel, content_id), "source", media_type)
+
+
+def output_dir_for(channel, content_id, platform):
+    """Return the outputs directory for a platform render."""
+    return os.path.join(project_dir(channel, content_id), "outputs", platform)
+
+
+# ── ComfyUI Communication ──────────────────────────────────
 
 def wait_for_comfyui():
     """Wait until ComfyUI API is responsive."""
@@ -73,10 +105,7 @@ def queue_prompt(workflow_json, client_id):
 
 
 def wait_for_completion(ws, prompt_id):
-    """
-    Wait for workflow to finish via websocket.
-    WS must be connected BEFORE calling queue_prompt.
-    """
+    """Wait for workflow to finish via websocket."""
     start_time = time.time()
 
     while True:
@@ -89,7 +118,6 @@ def wait_for_completion(ws, prompt_id):
         try:
             msg = ws.recv()
         except websocket.WebSocketTimeoutException:
-            # Check if prompt already finished (fallback)
             try:
                 history = get_history(prompt_id)
                 if prompt_id in history:
@@ -98,7 +126,6 @@ def wait_for_completion(ws, prompt_id):
                 pass
             continue
         except websocket.WebSocketConnectionClosedException:
-            # Connection lost — check history as fallback
             try:
                 history = get_history(prompt_id)
                 if prompt_id in history:
@@ -129,148 +156,300 @@ def get_history(prompt_id):
     return json.loads(resp.read())
 
 
-def collect_outputs(prompt_id):
-    """Collect ALL outputs from ComfyUI — images, audio, video, text."""
-    history = get_history(prompt_id)
-    prompt_history = history.get(prompt_id, {})
-    outputs = prompt_history.get("outputs", {})
-
-    results = {
-        "images": [],
-        "audio": [],
-        "video": [],
-        "text": [],
-    }
-
-    for node_id, node_output in outputs.items():
-        if "images" in node_output:
-            for img in node_output["images"]:
-                if img.get("type") == "temp":
-                    continue
-                file_path = find_output_file(img.get("filename"), img.get("subfolder", ""))
-                if file_path:
-                    results["images"].append({
-                        "filename": img["filename"],
-                        "node_id": node_id,
-                        "path": file_path,
-                        "base64": encode_file_base64(file_path),
-                    })
-
-        if "audio" in node_output:
-            for aud in node_output["audio"]:
-                file_path = find_output_file(aud.get("filename"), aud.get("subfolder", ""))
-                if file_path:
-                    file_size = os.path.getsize(file_path)
-                    results["audio"].append({
-                        "filename": aud["filename"],
-                        "node_id": node_id,
-                        "path": file_path,
-                        "size_mb": round(file_size / 1024 / 1024, 2),
-                        "base64": encode_file_base64(file_path) if file_size < 10 * 1024 * 1024 else None,
-                    })
-
-        if "gifs" in node_output:
-            for vid in node_output["gifs"]:
-                file_path = find_output_file(vid.get("filename"), vid.get("subfolder", ""))
-                if file_path:
-                    results["video"].append({
-                        "filename": vid["filename"],
-                        "node_id": node_id,
-                        "path": file_path,
-                        "size_mb": round(os.path.getsize(file_path) / 1024 / 1024, 2),
-                    })
-
-        if "text" in node_output:
-            for txt_item in node_output["text"]:
-                results["text"].append({
-                    "content": txt_item,
-                    "node_id": node_id,
-                })
-
-    return results
-
+# ── Output Collection ───────────────────────────────────────
 
 def find_output_file(filename, subfolder=""):
     """Find an output file in the known output directories."""
     if not filename:
         return None
-    for output_dir in OUTPUT_DIRS:
-        candidate = os.path.join(output_dir, subfolder, filename)
+    for out_dir in OUTPUT_DIRS:
+        candidate = os.path.join(out_dir, subfolder, filename)
         if os.path.exists(candidate):
             return candidate
-    for output_dir in OUTPUT_DIRS:
-        pattern = os.path.join(output_dir, "**", filename)
+    for out_dir in OUTPUT_DIRS:
+        pattern = os.path.join(out_dir, "**", filename)
         matches = glob_module.glob(pattern, recursive=True)
         if matches:
             return matches[0]
     return None
 
 
-def encode_file_base64(file_path):
-    """Encode a file as base64 string."""
-    try:
-        with open(file_path, "rb") as f:
-            return base64.b64encode(f.read()).decode("utf-8")
-    except Exception:
-        return None
+def collect_and_move(prompt_id, dest_dir, prefix, index=None):
+    """
+    Collect outputs from ComfyUI history and move them to the
+    organized project directory with consistent naming.
 
+    Naming logic:
+      - With index (e.g., index=3): chunk_003.flac (direct, no counter)
+        If the workflow produces multiple files: chunk_003_001.flac, chunk_003_002.flac
+      - Without index: scene_001.png, scene_002.png (counter-based)
 
-def copy_to_network_volume(file_path, job_id, category="output"):
-    """Copy output to Network Volume for S3 retrieval."""
-    if not os.path.exists(NETWORK_VOLUME_PATH):
-        return None
+    Returns list of dicts with filename + path for each output.
+    """
+    history = get_history(prompt_id)
+    prompt_history = history.get(prompt_id, {})
+    outputs = prompt_history.get("outputs", {})
 
-    dest_dir = os.path.join(NETWORK_VOLUME_PATH, "jobs", job_id, category)
     os.makedirs(dest_dir, exist_ok=True)
 
-    filename = os.path.basename(file_path)
-    dest_path = os.path.join(dest_dir, filename)
+    # First pass: count total files to decide naming strategy
+    all_files = []
+    for node_id, node_output in outputs.items():
+        if "images" in node_output:
+            for img in node_output["images"]:
+                if img.get("type") != "temp":
+                    src = find_output_file(img.get("filename"), img.get("subfolder", ""))
+                    if src:
+                        ext = os.path.splitext(img["filename"])[1] or ".png"
+                        all_files.append({"src": src, "ext": ext, "node_id": node_id, "type": "image"})
 
-    if not file_path.startswith(NETWORK_VOLUME_PATH):
-        import shutil
-        shutil.copy2(file_path, dest_path)
+        if "audio" in node_output:
+            for aud in node_output["audio"]:
+                src = find_output_file(aud.get("filename"), aud.get("subfolder", ""))
+                if src:
+                    ext = os.path.splitext(aud["filename"])[1] or ".flac"
+                    all_files.append({"src": src, "ext": ext, "node_id": node_id, "type": "audio"})
 
-    return dest_path
+        if "gifs" in node_output:
+            for vid in node_output["gifs"]:
+                src = find_output_file(vid.get("filename"), vid.get("subfolder", ""))
+                if src:
+                    ext = os.path.splitext(vid["filename"])[1] or ".mp4"
+                    all_files.append({"src": src, "ext": ext, "node_id": node_id, "type": "video"})
+
+        if "text" in node_output:
+            for txt_item in node_output["text"]:
+                all_files.append({"content": txt_item, "ext": ".txt", "node_id": node_id, "type": "text"})
+
+    # Second pass: name and move
+    results = []
+    for i, item in enumerate(all_files):
+        if index is not None and len(all_files) == 1:
+            dest_name = f"{prefix}_{index:03d}{item['ext']}"
+        elif index is not None:
+            dest_name = f"{prefix}_{index:03d}_{i + 1:03d}{item['ext']}"
+        else:
+            dest_name = f"{prefix}_{i + 1:03d}{item['ext']}"
+
+        dest_path = os.path.join(dest_dir, dest_name)
+
+        if item["type"] == "text":
+            with open(dest_path, "w", encoding="utf-8") as f:
+                content = item["content"]
+                f.write(content if isinstance(content, str) else json.dumps(content))
+        else:
+            shutil.copy2(item["src"], dest_path)
+
+        entry = {"filename": dest_name, "path": dest_path, "node_id": item["node_id"]}
+        if item["type"] in ("audio", "video") and item.get("src"):
+            entry["size_mb"] = round(os.path.getsize(dest_path) / 1024 / 1024, 2)
+        results.append(entry)
+
+    return results
 
 
-def inject_inputs(input_images=None, input_audio=None):
-    """Inject base64-encoded input files into ComfyUI's input folder."""
-    if input_images:
-        for name, b64 in input_images.items():
-            with open(os.path.join("/comfyui/input", name), "wb") as f:
-                f.write(base64.b64decode(b64))
+# ── Compose (FFmpeg) ────────────────────────────────────────
 
-    if input_audio:
-        for name, b64 in input_audio.items():
-            with open(os.path.join("/comfyui/input", name), "wb") as f:
-                f.write(base64.b64decode(b64))
+def run_compose(channel, content_id, platform, compose_config):
+    """
+    FFmpeg composition job. Reads from source/, writes to outputs/{platform}/.
 
+    compose_config can specify:
+      - type: "concat_audio" | "concat_video" | "full"
+      - format: output format settings per platform
+    """
+    src = os.path.join(project_dir(channel, content_id), "source")
+    dest = output_dir_for(channel, content_id, platform)
+    os.makedirs(dest, exist_ok=True)
+
+    compose_type = compose_config.get("type", "concat_audio")
+
+    if compose_type == "concat_audio":
+        return _compose_concat_audio(src, dest, content_id)
+    elif compose_type == "concat_video":
+        return _compose_concat_video(src, dest, content_id)
+    elif compose_type == "full":
+        return _compose_full(src, dest, content_id, compose_config)
+    else:
+        raise RuntimeError(f"Unknown compose type: {compose_type}")
+
+
+def _compose_concat_audio(src, dest, content_id):
+    """Concatenate all audio chunks into a single file."""
+    audio_dir = os.path.join(src, "audio")
+    if not os.path.isdir(audio_dir):
+        raise RuntimeError(f"No audio directory found: {audio_dir}")
+
+    chunks = sorted(glob_module.glob(os.path.join(audio_dir, "chunk_*")))
+    if not chunks:
+        raise RuntimeError(f"No audio chunks found in {audio_dir}")
+
+    # Build ffmpeg concat file
+    concat_list = os.path.join(dest, "concat_list.txt")
+    with open(concat_list, "w") as f:
+        for chunk in chunks:
+            f.write(f"file '{chunk}'\n")
+
+    output_path = os.path.join(dest, f"{content_id}_audio.flac")
+    cmd = [
+        "ffmpeg", "-y", "-f", "concat", "-safe", "0",
+        "-i", concat_list, "-c:a", "flac", output_path
+    ]
+
+    result = subprocess.run(cmd, capture_output=True, text=True, timeout=300)
+    if result.returncode != 0:
+        raise RuntimeError(f"FFmpeg concat_audio failed: {result.stderr[:500]}")
+
+    os.remove(concat_list)
+    return [{"filename": f"{content_id}_audio.flac", "path": output_path,
+             "size_mb": round(os.path.getsize(output_path) / 1024 / 1024, 2)}]
+
+
+def _compose_concat_video(src, dest, content_id):
+    """Concatenate all video clips into a single file."""
+    video_dir = os.path.join(src, "video")
+    if not os.path.isdir(video_dir):
+        raise RuntimeError(f"No video directory found: {video_dir}")
+
+    clips = sorted(glob_module.glob(os.path.join(video_dir, "scene_*")))
+    if not clips:
+        raise RuntimeError(f"No video clips found in {video_dir}")
+
+    concat_list = os.path.join(dest, "concat_list.txt")
+    with open(concat_list, "w") as f:
+        for clip in clips:
+            f.write(f"file '{clip}'\n")
+
+    output_path = os.path.join(dest, f"{content_id}_video.mp4")
+    cmd = [
+        "ffmpeg", "-y", "-f", "concat", "-safe", "0",
+        "-i", concat_list, "-c", "copy", output_path
+    ]
+
+    result = subprocess.run(cmd, capture_output=True, text=True, timeout=600)
+    if result.returncode != 0:
+        raise RuntimeError(f"FFmpeg concat_video failed: {result.stderr[:500]}")
+
+    os.remove(concat_list)
+    return [{"filename": f"{content_id}_video.mp4", "path": output_path,
+             "size_mb": round(os.path.getsize(output_path) / 1024 / 1024, 2)}]
+
+
+def _compose_full(src, dest, content_id, config):
+    """
+    Full composition: video + audio + subtitles → final video.
+    Expects concat_audio and concat_video to have run first,
+    or source files to be specified in config.
+    """
+    video_in = config.get("video_path", os.path.join(dest, f"{content_id}_video.mp4"))
+    audio_in = config.get("audio_path", os.path.join(dest, f"{content_id}_audio.flac"))
+    srt_in = config.get("srt_path")
+
+    if not os.path.exists(video_in):
+        raise RuntimeError(f"Video not found: {video_in}")
+    if not os.path.exists(audio_in):
+        raise RuntimeError(f"Audio not found: {audio_in}")
+
+    output_path = os.path.join(dest, f"{content_id}_final.mp4")
+
+    cmd = ["ffmpeg", "-y", "-i", video_in, "-i", audio_in]
+
+    if srt_in and os.path.exists(srt_in):
+        cmd += ["-vf", f"subtitles={srt_in}"]
+
+    cmd += ["-c:v", "libx264", "-c:a", "aac", "-shortest", output_path]
+
+    result = subprocess.run(cmd, capture_output=True, text=True, timeout=900)
+    if result.returncode != 0:
+        raise RuntimeError(f"FFmpeg full compose failed: {result.stderr[:500]}")
+
+    return [{"filename": f"{content_id}_final.mp4", "path": output_path,
+             "size_mb": round(os.path.getsize(output_path) / 1024 / 1024, 2)}]
+
+
+# ── Main Handler ────────────────────────────────────────────
 
 def handler(job):
     """
-    RunPod Serverless handler.
-    Pattern: connect WS → queue prompt → wait for completion → collect outputs.
+    RunPod Serverless handler v2.
+
+    Expected input:
+    {
+        "job_type": "txt-img" | "txt-voice" | "voice-srt" | "img-vid" | "compose",
+        "channel": "dominion",
+        "content_id": "vid-2026-04-03-darknet",
+        "workflow": { ... ComfyUI API format ... },
+        "prefix": "scene" | "chunk",      # naming prefix (default from job_type)
+        "index": 1,                         # optional: specific item index
+        "platform": "youtube",              # for compose jobs
+        "compose": { "type": "concat_audio" | "concat_video" | "full" }
+    }
     """
     job_input = job.get("input", {})
     job_id = job.get("id", "unknown")
 
+    # ── Validate required fields ──
+    job_type = job_input.get("job_type")
+    channel = job_input.get("channel")
+    content_id = job_input.get("content_id")
+
+    if not job_type:
+        return {"error": "Missing required field: job_type"}
+    if not channel:
+        return {"error": "Missing required field: channel"}
+    if not content_id:
+        return {"error": "Missing required field: content_id"}
+
+    # ── Compose jobs don't need ComfyUI ──
+    if job_type == "compose":
+        platform = job_input.get("platform", "youtube")
+        compose_config = job_input.get("compose", {})
+        try:
+            results = run_compose(channel, content_id, platform, compose_config)
+            return {
+                "status": "success",
+                "job_type": job_type,
+                "channel": channel,
+                "content_id": content_id,
+                "platform": platform,
+                "outputs": results,
+            }
+        except RuntimeError as e:
+            return {"error": str(e), "job_type": job_type}
+
+    # ── ComfyUI workflow jobs ──
+    if job_type not in JOB_TYPE_OUTPUT:
+        return {"error": f"Unknown job_type: {job_type}. Valid: {list(JOB_TYPE_OUTPUT.keys()) + ['compose']}"}
+
     workflow = job_input.get("workflow")
     if not workflow:
-        return {"error": "No workflow provided"}
+        return {"error": "Missing required field: workflow"}
 
-    # Wait for ComfyUI to be ready
+    # Determine output naming
+    default_prefixes = {
+        "txt-img": "scene",
+        "txt-voice": "chunk",
+        "voice-srt": "chunk",
+        "img-vid": "scene",
+    }
+    prefix = job_input.get("prefix", default_prefixes.get(job_type, "output"))
+
+    # If an index is provided, use it for naming (e.g., chunk_003)
+    # When index is set, the file is named directly (chunk_003.flac)
+    # without an extra counter suffix — each job produces one logical output.
+    index = job_input.get("index")
+
+    # Destination directory
+    media_type = JOB_TYPE_OUTPUT[job_type]
+    dest = source_dir(channel, content_id, media_type)
+
+    # Wait for ComfyUI
     try:
         wait_for_comfyui()
     except RuntimeError as e:
         return {"error": str(e)}
 
-    # Inject input files if provided
-    inject_inputs(
-        input_images=job_input.get("input_images"),
-        input_audio=job_input.get("input_audio"),
-    )
-
-    # Step 1: Connect WebSocket FIRST (before queuing)
+    # Connect WebSocket FIRST
     client_id = str(uuid.uuid4())
     ws_url = f"ws://{COMFY_HOST}/ws?clientId={client_id}"
     try:
@@ -280,14 +459,14 @@ def handler(job):
     except Exception as e:
         return {"error": f"Failed to connect websocket: {str(e)}"}
 
-    # Step 2: Queue workflow (with same client_id)
+    # Queue workflow
     try:
         prompt_id = queue_prompt(workflow, client_id)
     except Exception as e:
         ws.close()
         return {"error": f"Failed to queue prompt: {str(e)}"}
 
-    # Step 3: Wait for completion
+    # Wait for completion
     try:
         wait_for_completion(ws, prompt_id)
     except RuntimeError as e:
@@ -295,28 +474,16 @@ def handler(job):
     finally:
         ws.close()
 
-    # Step 4: Collect outputs
-    results = collect_outputs(prompt_id)
-
-    # Copy to Network Volume for S3 retrieval
-    for category in ["images", "audio", "video"]:
-        for item in results[category]:
-            if item.get("path"):
-                nv_path = copy_to_network_volume(item["path"], job_id, category)
-                if nv_path:
-                    item["s3_key"] = nv_path.replace(NETWORK_VOLUME_PATH + "/", "")
-
-    summary = {
-        "images": len(results["images"]),
-        "audio": len(results["audio"]),
-        "video": len(results["video"]),
-        "text": len(results["text"]),
-    }
+    # Collect outputs and move to organized directory
+    results = collect_and_move(prompt_id, dest, prefix, index=index)
 
     return {
-        "output": results,
-        "summary": summary,
-        "job_id": job_id,
+        "status": "success",
+        "job_type": job_type,
+        "channel": channel,
+        "content_id": content_id,
+        "output_dir": dest,
+        "outputs": results,
     }
 
 
