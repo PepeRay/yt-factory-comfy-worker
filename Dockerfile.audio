@@ -26,6 +26,7 @@ RUN apt-get update && apt-get install -y \
     libsndfile1 \
     libgl1 \
     libglib2.0-0 \
+    build-essential \
     && ln -sf /usr/bin/python3.12 /usr/bin/python \
     && ln -sf /usr/bin/pip3 /usr/bin/pip \
     && apt-get autoremove -y && apt-get clean -y && rm -rf /var/lib/apt/lists/*
