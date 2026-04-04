@@ -1,7 +1,7 @@
 # ============================================================
 # YouTube Factory — Audio Endpoint (VibeVoice TTS + Whisper STT)
 # Job types: txt-voice, voice-srt
-# Optimized: Only audio nodes and models
+# Optimized: Minimal deps for audio-only workflows
 # ============================================================
 
 ARG BASE_IMAGE=nvidia/cuda:12.6.3-cudnn-runtime-ubuntu24.04
@@ -15,21 +15,17 @@ ENV PIP_PREFER_BINARY=1
 ENV PYTHONUNBUFFERED=1
 ENV CMAKE_BUILD_PARALLEL_LEVEL=8
 
-# System dependencies
+# System dependencies (audio-focused)
 RUN apt-get update && apt-get install -y \
     python3.12 \
     python3.12-venv \
     python3.12-dev \
     git \
     wget \
-    libgl1 \
-    libglib2.0-0 \
-    libsm6 \
-    libxext6 \
-    libxrender1 \
     ffmpeg \
     libsndfile1 \
-    build-essential \
+    libgl1 \
+    libglib2.0-0 \
     && ln -sf /usr/bin/python3.12 /usr/bin/python \
     && ln -sf /usr/bin/pip3 /usr/bin/pip \
     && apt-get autoremove -y && apt-get clean -y && rm -rf /var/lib/apt/lists/*
@@ -59,12 +55,11 @@ RUN grep -v -i -E '^(torch==|torch>=|torch<=|torchvision==|torchvision>=|torchau
 COPY extra_model_paths.yaml ./
 
 # ── Custom Nodes: AUDIO ONLY ────────────────────────────────
-# Whisper (STT) + KJNodes (utility) + Custom Scripts
+# Whisper (STT) + VHS (VHS_LoadAudio for voice-srt workflow)
 RUN comfy node install comfyui-whisper || true && \
-    comfy node install comfyui-kjnodes || true && \
-    comfy node install comfyui-custom-scripts || true
+    comfy node install comfyui-videohelpersuite || true
 
-# VibeVoice + TTS-Audio-Suite (from git)
+# VibeVoice (TTS) — fallback if Network Volume unavailable
 RUN cd custom_nodes \
     && (git clone https://github.com/DualOrion/VibeVoice-ComfyUI.git \
         && cd VibeVoice-ComfyUI && pip install -r requirements.txt 2>/dev/null \
@@ -76,59 +71,33 @@ RUN cd custom_nodes \
 
 WORKDIR /
 
-# ── Audio/ML dependencies ───────────────────────────────────
+# ── Audio deps: only what workflows need ────────────────────
+# VibeVoice core deps
 RUN uv pip install \
     "transformers>=4.40,<5.0" \
     accelerate \
-    diffusers \
-    peft \
-    datasets \
     scipy \
     librosa \
     soundfile \
-    sounddevice \
     av \
-    aiortc \
-    bitsandbytes \
-    ml-collections \
-    absl-py \
-    omegaconf \
-    dacite \
-    conformer \
+    echo-tts \
+    vocos \
     x-transformers \
+    conformer \
     torchdiffeq \
     ema-pytorch \
-    vocos \
-    echo-tts \
     monotonic-alignment-search \
-    && echo "=== Audio/ML deps installed ==="
+    && echo "=== VibeVoice deps installed ==="
 
-# TTS-Audio-Suite specific deps
+# TTS-Audio-Suite: only English TTS/STT deps
 RUN uv pip install \
-    jieba \
-    pypinyin \
     unidecode \
     phonemizer \
-    cn2an \
     g2p-en \
     inflect \
     sentencepiece \
-    textstat \
-    punctuators \
-    funasr \
-    nagisa \
-    hyperpyyaml \
-    modelscope \
-    munch \
-    json5 \
-    faiss-cpu \
-    praat-parselmouth \
-    pyworld \
-    torchfcpe \
-    wandb \
-    keras \
     openai-whisper \
-    && echo "=== TTS deps installed ==="
+    && echo "=== TTS-Audio-Suite deps installed ==="
 
 # ── Restore critical packages ───────────────────────────────
 RUN uv pip install --force-reinstall \
@@ -151,7 +120,6 @@ RUN python -c "\
 import torch; \
 import torchaudio; \
 import numpy; \
-import comfy_aimdo; \
 import transformers; \
 print(f'torch={torch.__version__}, numpy={numpy.__version__}'); \
 print('=== Audio endpoint environment verified ===')"
