@@ -15,9 +15,11 @@ GitHub (PepeRay/yt-factory-comfy-worker)
 
 ## Credenciales y Endpoints
 
+> **API keys y secrets:** `.claude/settings.local.json` (raíz del vault)
+> **Referencia completa:** `Automatización Youtube/.claude/credentials.md`
+
 - **GitHub repo**: `PepeRay/yt-factory-comfy-worker`
 - **RunPod Endpoint ID**: `94qcu1n3xnl03o`
-- **RunPod API Key**: (ver variable de entorno o memoria de Claude)
 - **Network Volume ID**: `29swi0udsr` (ComfyUI Audio, 150GB, US-IL-1)
 - **Console URL**: https://console.runpod.io/serverless/user/endpoint/94qcu1n3xnl03o
 

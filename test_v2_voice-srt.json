@@ -1,0 +1,51 @@
+{
+  "input": {
+    "job_type": "voice-srt",
+    "channel": "dominion",
+    "content_id": "test-001",
+    "index": 1,
+    "workflow": {
+      "2": {
+        "inputs": {
+          "audio_file": "/comfyui/input/Voz_Dominion.wav",
+          "seek_seconds": 0,
+          "duration": 0
+        },
+        "class_type": "VHS_LoadAudio",
+        "_meta": {
+          "title": "Load Audio (Path)🎥🅥🅗🅢"
+        }
+      },
+      "3": {
+        "inputs": {
+          "model": "large-v3",
+          "language": "English",
+          "prompt": "This is an authoritative, documentary-style English narration from a YouTube channel about geopolitics, economics, and finance called Dominion. Please transcribe clearly using short sentences, correct punctuation, and proper capitalization. Maintain a serious, calm tone. Include paragraph or sentence breaks suitable for subtitles (1–2 short phrases per line). Recognize and spell correctly key terms such as: debt, inflation, deflation, fiat money, central banks, CBDC, cryptocurrency, digital currency, monetary policy, collapse, empire, wealth, GDP, sanctions, petrodollar, and global markets.",
+          "audio": [
+            "2",
+            0
+          ]
+        },
+        "class_type": "Apply Whisper",
+        "_meta": {
+          "title": "Apply Whisper"
+        }
+      },
+      "4": {
+        "inputs": {
+          "preview_markdown": "",
+          "preview_text": "",
+          "previewMode": null,
+          "source": [
+            "3",
+            1
+          ]
+        },
+        "class_type": "PreviewAny",
+        "_meta": {
+          "title": "Preview as Text"
+        }
+      }
+    }
+  }
+}

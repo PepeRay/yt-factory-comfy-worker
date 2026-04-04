@@ -1,0 +1,578 @@
+{
+  "id": "25dfce61-3571-4c9a-a7f8-6a83951d66aa",
+  "revision": 0,
+  "last_node_id": 651,
+  "last_link_id": 761,
+  "nodes": [
+    {
+      "id": 582,
+      "type": "RVCPitchOptionsNode",
+      "pos": [
+        21832.19921875,
+        1445.27587890625
+      ],
+      "size": [
+        305.6070251464844,
+        202
+      ],
+      "flags": {},
+      "order": 0,
+      "mode": 4,
+      "inputs": [],
+      "outputs": [
+        {
+          "name": "rvc_pitch_options",
+          "type": "RVC_PITCH_OPTIONS",
+          "links": [
+            682
+          ]
+        }
+      ],
+      "properties": {
+        "cnr_id": "tts_audio_suite",
+        "ver": "4.8.6",
+        "Node name for S&R": "RVCPitchOptionsNode",
+        "ue_properties": {
+          "widget_ue_connectable": {},
+          "version": "7.1",
+          "input_ue_unconnectable": {}
+        }
+      },
+      "widgets_values": [
+        "rmvpe",
+        160,
+        3,
+        1,
+        false,
+        true,
+        1
+      ],
+      "color": "#233",
+      "bgcolor": "#355"
+    },
+    {
+      "id": 583,
+      "type": "RVCEngineNode",
+      "pos": [
+        22152.19921875,
+        1445.27587890625
+      ],
+      "size": [
+        278.75,
+        202
+      ],
+      "flags": {},
+      "order": 5,
+      "mode": 4,
+      "inputs": [
+        {
+          "name": "rvc_pitch_options",
+          "shape": 7,
+          "type": "RVC_PITCH_OPTIONS",
+          "link": 682
+        }
+      ],
+      "outputs": [
+        {
+          "name": "TTS_engine",
+          "type": "TTS_ENGINE",
+          "links": [
+            679
+          ]
+        }
+      ],
+      "properties": {
+        "cnr_id": "tts_audio_suite",
+        "ver": "4.8.6",
+        "Node name for S&R": "RVCEngineNode",
+        "ue_properties": {
+          "widget_ue_connectable": {},
+          "version": "7.1",
+          "input_ue_unconnectable": {}
+        }
+      },
+      "widgets_values": [
+        0,
+        0.75,
+        0.25,
+        0.25,
+        "hubert-base-rvc: HuBERT Base RVC (Recommended)",
+        0,
+        "auto"
+      ],
+      "color": "#233",
+      "bgcolor": "#355"
+    },
+    {
+      "id": 581,
+      "type": "UnifiedVoiceChangerNode",
+      "pos": [
+        21832.19921875,
+        1305.27587890625
+      ],
+      "size": [
+        591.97119140625,
+        146
+      ],
+      "flags": {},
+      "order": 8,
+      "mode": 4,
+      "inputs": [
+        {
+          "name": "TTS_engine",
+          "type": "TTS_ENGINE",
+          "link": 679
+        },
+        {
+          "name": "source_audio",
+          "type": "*",
+          "link": 761
+        },
+        {
+          "name": "narrator_target",
+          "type": "*",
+          "link": 681
+        }
+      ],
+      "outputs": [
+        {
+          "name": "converted_audio",
+          "type": "AUDIO",
+          "links": [
+            698
+          ]
+        },
+        {
+          "name": "conversion_info",
+          "type": "STRING",
+          "links": null
+        }
+      ],
+      "properties": {
+        "cnr_id": "chatterbox_srt_voice",
+        "ver": "4971b8fd0f92c29b108c2606ab8b79b00a590adf",
+        "Node name for S&R": "UnifiedVoiceChangerNode",
+        "ue_properties": {
+          "version": "7.1",
+          "widget_ue_connectable": {},
+          "input_ue_unconnectable": {}
+        }
+      },
+      "widgets_values": [
+        1,
+        30,
+        "smart"
+      ],
+      "color": "#233",
+      "bgcolor": "#355"
+    },
+    {
+      "id": 600,
+      "type": "SaveAudio",
+      "pos": [
+        22502.19921875,
+        1315.27587890625
+      ],
+      "size": [
+        402.85211181640625,
+        329.5067443847656
+      ],
+      "flags": {},
+      "order": 9,
+      "mode": 4,
+      "inputs": [
+        {
+          "name": "audio",
+          "type": "AUDIO",
+          "link": 698
+        }
+      ],
+      "outputs": [],
+      "title": "SaveAudio FINAL RVC",
+      "properties": {
+        "cnr_id": "comfy-core",
+        "ver": "0.3.59",
+        "Node name for S&R": "SaveAudio"
+      },
+      "widgets_values": [
+        "audio/ComfyUI"
+      ],
+      "color": "#233",
+      "bgcolor": "#355"
+    },
+    {
+      "id": 584,
+      "type": "LoadRVCModelNode",
+      "pos": [
+        21152.19921875,
+        1315.27587890625
+      ],
+      "size": [
+        589.7208251953125,
+        326.7666015625
+      ],
+      "flags": {},
+      "order": 1,
+      "mode": 4,
+      "inputs": [],
+      "outputs": [
+        {
+          "name": "rvc_model",
+          "type": "RVC_MODEL",
+          "links": [
+            681
+          ]
+        },
+        {
+          "name": "model_info",
+          "type": "STRING",
+          "links": null
+        }
+      ],
+      "properties": {
+        "cnr_id": "chatterbox_srt_voice",
+        "ver": "4971b8fd0f92c29b108c2606ab8b79b00a590adf",
+        "Node name for S&R": "LoadRVCModelNode",
+        "ue_properties": {
+          "version": "7.1",
+          "widget_ue_connectable": {},
+          "input_ue_unconnectable": {}
+        }
+      },
+      "widgets_values": [
+        "Monika.pth",
+        "Monika_v2_40k.index",
+        true
+      ],
+      "color": "#233",
+      "bgcolor": "#355"
+    },
+    {
+      "id": 605,
+      "type": "Fast Groups Bypasser (rgthree)",
+      "pos": [
+        20707.544921875,
+        1291.9569091796875
+      ],
+      "size": [
+        374.87261962890625,
+        82
+      ],
+      "flags": {},
+      "order": 2,
+      "mode": 0,
+      "inputs": [],
+      "outputs": [
+        {
+          "label": "OPT_CONNECTION",
+          "name": "OPT_CONNECTION",
+          "type": "*",
+          "links": null
+        }
+      ],
+      "properties": {
+        "matchColors": "",
+        "matchTitle": "ENABLE RVC",
+        "showNav": true,
+        "showAllGraphs": true,
+        "sort": "position",
+        "customSortAlphabet": "",
+        "toggleRestriction": "default",
+        "widget_ue_connectable": {}
+      }
+    },
+    {
+      "id": 596,
+      "type": "LoadAudio",
+      "pos": [
+        21256.009765625,
+        884.2102661132812
+      ],
+      "size": [
+        587.1167602539062,
+        136
+      ],
+      "flags": {},
+      "order": 3,
+      "mode": 0,
+      "inputs": [],
+      "outputs": [
+        {
+          "name": "AUDIO",
+          "type": "AUDIO",
+          "links": [
+            759
+          ]
+        }
+      ],
+      "properties": {
+        "cnr_id": "comfy-core",
+        "ver": "0.3.59",
+        "Node name for S&R": "LoadAudio"
+      },
+      "widgets_values": [
+        "Voz_Dominion.wav",
+        null,
+        null
+      ],
+      "color": "#223",
+      "bgcolor": "#335"
+    },
+    {
+      "id": 610,
+      "type": "PrimitiveStringMultiline",
+      "pos": [
+        21243.09765625,
+        474.4427185058594
+      ],
+      "size": [
+        585.7481689453125,
+        327.10693359375
+      ],
+      "flags": {},
+      "order": 4,
+      "mode": 0,
+      "inputs": [],
+      "outputs": [
+        {
+          "name": "STRING",
+          "type": "STRING",
+          "links": [
+            758
+          ]
+        }
+      ],
+      "properties": {
+        "cnr_id": "comfy-core",
+        "ver": "0.3.40",
+        "Node name for S&R": "PrimitiveStringMultiline",
+        "ue_properties": {
+          "version": "7.1",
+          "widget_ue_connectable": {},
+          "input_ue_unconnectable": {}
+        }
+      },
+      "widgets_values": [
+        "\"So is there a clean exit? \" Here is the false exit list: Stricter rules. [pause:100] It's good until risk migrates. Bigger hoses. Useful until politics balk. Let it burn. Brave until pensions melt and businesses miss payroll. [pause:100] Nationalize the dark. Impossible the dark is everywhere, by design. [pause:100] False exits aren't exits. They are detours back to the same turn. [pause:100] The real answer isn't romantic. It's transparency over theater. Measure leverage in funds, not just banks."
+      ],
+      "color": "#232",
+      "bgcolor": "#353"
+    },
+    {
+      "id": 595,
+      "type": "SaveAudio",
+      "pos": [
+        22864.06640625,
+        511.13250732421875
+      ],
+      "size": [
+        533.680908203125,
+        184.2256317138672
+      ],
+      "flags": {},
+      "order": 7,
+      "mode": 0,
+      "inputs": [
+        {
+          "name": "audio",
+          "type": "AUDIO",
+          "link": 760
+        }
+      ],
+      "outputs": [],
+      "title": "SaveAudio VibeVoice",
+      "properties": {
+        "cnr_id": "comfy-core",
+        "ver": "0.3.59",
+        "Node name for S&R": "SaveAudio"
+      },
+      "widgets_values": [
+        "audio/Dominion/ComfyUI"
+      ]
+    },
+    {
+      "id": 650,
+      "type": "VibeVoiceMultipleSpeakersNode",
+      "pos": [
+        21914.951171875,
+        466.87982177734375
+      ],
+      "size": [
+        870,
+        640
+      ],
+      "flags": {},
+      "order": 6,
+      "mode": 0,
+      "inputs": [
+        {
+          "name": "speaker1_voice",
+          "shape": 7,
+          "type": "AUDIO",
+          "link": 759
+        },
+        {
+          "name": "speaker2_voice",
+          "shape": 7,
+          "type": "AUDIO",
+          "link": null
+        },
+        {
+          "name": "speaker3_voice",
+          "shape": 7,
+          "type": "AUDIO",
+          "link": null
+        },
+        {
+          "name": "speaker4_voice",
+          "shape": 7,
+          "type": "AUDIO",
+          "link": null
+        },
+        {
+          "name": "lora",
+          "shape": 7,
+          "type": "LORA_CONFIG",
+          "link": null
+        },
+        {
+          "name": "text",
+          "type": "STRING",
+          "widget": {
+            "name": "text"
+          },
+          "link": 758
+        }
+      ],
+      "outputs": [
+        {
+          "name": "audio",
+          "type": "AUDIO",
+          "links": [
+            760,
+            761
+          ]
+        }
+      ],
+      "properties": {
+        "cnr_id": "VibeVoice-ComfyUI",
+        "ver": "9185f531ac45fc67576f9877caf1a6c8c7d340b5",
+        "Node name for S&R": "VibeVoiceMultipleSpeakersNode"
+      },
+      "widgets_values": [
+        "[1]: Hello, this is the first speaker.\n[2]: Hi there, I'm the second speaker.\n[1]: Nice to meet you!\n[2]: Nice to meet you too!",
+        "VibeVoice-Large",
+        "sdpa",
+        "full precision",
+        true,
+        30,
+        2538721887,
+        "fixed",
+        1.36,
+        false,
+        0.6,
+        0.8,
+        1
+      ]
+    }
+  ],
+  "links": [
+    [
+      679,
+      583,
+      0,
+      581,
+      0,
+      "TTS_ENGINE"
+    ],
+    [
+      681,
+      584,
+      0,
+      581,
+      2,
+      "*"
+    ],
+    [
+      682,
+      582,
+      0,
+      583,
+      0,
+      "RVC_PITCH_OPTIONS"
+    ],
+    [
+      698,
+      581,
+      0,
+      600,
+      0,
+      "AUDIO"
+    ],
+    [
+      758,
+      610,
+      0,
+      650,
+      5,
+      "STRING"
+    ],
+    [
+      759,
+      596,
+      0,
+      650,
+      0,
+      "AUDIO"
+    ],
+    [
+      760,
+      650,
+      0,
+      595,
+      0,
+      "AUDIO"
+    ],
+    [
+      761,
+      650,
+      0,
+      581,
+      1,
+      "*"
+    ]
+  ],
+  "groups": [
+    {
+      "id": 33,
+      "title": "ENABLE RVC",
+      "bounding": [
+        21142.19921875,
+        1231.67578125,
+        1772.8515625,
+        425.6000061035156
+      ],
+      "color": "#8AA",
+      "font_size": 24,
+      "flags": {}
+    }
+  ],
+  "config": {},
+  "extra": {
+    "ds": {
+      "scale": 1.0554424599694425,
+      "offset": [
+        -21082.158236792657,
+        -434.03865060471185
+      ]
+    },
+    "frontendVersion": "1.42.8",
+    "groupNodes": {},
+    "VHS_latentpreview": false,
+    "VHS_latentpreviewrate": 0,
+    "VHS_MetadataImage": true,
+    "VHS_KeepIntermediate": true,
+    "ue_links": []
+  },
+  "version": 0.4
+}
