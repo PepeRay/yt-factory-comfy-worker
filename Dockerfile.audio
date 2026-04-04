@@ -55,9 +55,10 @@ RUN grep -v -i -E '^(torch==|torch>=|torch<=|torchvision==|torchvision>=|torchau
 COPY extra_model_paths.yaml ./
 
 # ── Custom Nodes: AUDIO ONLY ────────────────────────────────
-# Whisper (STT) + VHS (VHS_LoadAudio for voice-srt workflow)
+# Whisper (STT) + VHS (VHS_LoadAudio) + custom-scripts (PreviewAny)
 RUN comfy node install comfyui-whisper || true && \
-    comfy node install comfyui-videohelpersuite || true
+    comfy node install comfyui-videohelpersuite || true && \
+    comfy node install comfyui-custom-scripts || true
 
 # VibeVoice (TTS) — fallback if Network Volume unavailable
 RUN cd custom_nodes \
@@ -72,14 +73,20 @@ RUN cd custom_nodes \
 WORKDIR /
 
 # ── Audio deps: only what workflows need ────────────────────
-# VibeVoice core deps
+# VibeVoice core deps (NV version may import any of these)
 RUN uv pip install \
     "transformers>=4.40,<5.0" \
     accelerate \
+    peft \
+    bitsandbytes \
+    datasets \
     scipy \
     librosa \
     soundfile \
+    sounddevice \
     av \
+    omegaconf \
+    dacite \
     echo-tts \
     vocos \
     x-transformers \
@@ -89,7 +96,7 @@ RUN uv pip install \
     monotonic-alignment-search \
     && echo "=== VibeVoice deps installed ==="
 
-# TTS-Audio-Suite: only English TTS/STT deps
+# TTS-Audio-Suite deps (NV version imports these at startup)
 RUN uv pip install \
     unidecode \
     phonemizer \
@@ -97,6 +104,12 @@ RUN uv pip install \
     inflect \
     sentencepiece \
     openai-whisper \
+    hyperpyyaml \
+    munch \
+    json5 \
+    praat-parselmouth \
+    pyworld \
+    torchfcpe \
     && echo "=== TTS-Audio-Suite deps installed ==="
 
 # ── Restore critical packages ───────────────────────────────
