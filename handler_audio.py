@@ -194,6 +194,8 @@ def collect_and_move(prompt_id, dest_dir, prefix, index=None):
         entry = {"filename": dest_name, "path": dest_path, "node_id": item["node_id"]}
         if item.get("src"):
             entry["size_mb"] = round(os.path.getsize(dest_path) / 1024 / 1024, 2)
+        if item["type"] == "text":
+            entry["content"] = item["content"] if isinstance(item["content"], str) else json.dumps(item["content"])
         results.append(entry)
 
     return results
