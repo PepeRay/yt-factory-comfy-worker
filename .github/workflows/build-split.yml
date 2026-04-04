@@ -1,0 +1,151 @@
+name: Build & Push Split Docker Images
+
+on:
+  push:
+    branches: [main]
+    paths:
+      - 'Dockerfile.*'
+      - 'handler_*.py'
+      - 'start_*.sh'
+      - 'extra_model_paths.yaml'
+  workflow_dispatch:
+    inputs:
+      target:
+        description: 'Which image to build (audio, images, video, all)'
+        required: false
+        default: 'all'
+
+env:
+  REGISTRY: ghcr.io
+  IMAGE_PREFIX: ghcr.io/${{ github.repository_owner }}/yt-factory
+
+jobs:
+  build-audio:
+    if: >-
+      github.event_name == 'workflow_dispatch' &&
+      (github.event.inputs.target == 'all' || github.event.inputs.target == 'audio') ||
+      github.event_name == 'push'
+    runs-on: ubuntu-latest
+    permissions:
+      contents: read
+      packages: write
+    steps:
+      - uses: actions/checkout@v4
+
+      - uses: docker/login-action@v3
+        with:
+          registry: ghcr.io
+          username: ${{ github.actor }}
+          password: ${{ secrets.GITHUB_TOKEN }}
+
+      - uses: docker/setup-buildx-action@v3
+
+      - uses: docker/build-push-action@v6
+        with:
+          context: .
+          file: Dockerfile.audio
+          push: true
+          tags: |
+            ${{ env.IMAGE_PREFIX }}-audio:latest
+            ${{ env.IMAGE_PREFIX }}-audio:${{ github.sha }}
+          cache-from: type=gha,scope=audio
+          cache-to: type=gha,mode=max,scope=audio
+
+  build-images:
+    if: >-
+      github.event_name == 'workflow_dispatch' &&
+      (github.event.inputs.target == 'all' || github.event.inputs.target == 'images') ||
+      github.event_name == 'push'
+    runs-on: ubuntu-latest
+    permissions:
+      contents: read
+      packages: write
+    steps:
+      - uses: actions/checkout@v4
+
+      - uses: docker/login-action@v3
+        with:
+          registry: ghcr.io
+          username: ${{ github.actor }}
+          password: ${{ secrets.GITHUB_TOKEN }}
+
+      - uses: docker/setup-buildx-action@v3
+
+      - uses: docker/build-push-action@v6
+        with:
+          context: .
+          file: Dockerfile.images
+          push: true
+          tags: |
+            ${{ env.IMAGE_PREFIX }}-images:latest
+            ${{ env.IMAGE_PREFIX }}-images:${{ github.sha }}
+          cache-from: type=gha,scope=images
+          cache-to: type=gha,mode=max,scope=images
+
+  build-video:
+    if: >-
+      github.event_name == 'workflow_dispatch' &&
+      (github.event.inputs.target == 'all' || github.event.inputs.target == 'video') ||
+      github.event_name == 'push'
+    runs-on: ubuntu-latest
+    permissions:
+      contents: read
+      packages: write
+    steps:
+      - uses: actions/checkout@v4
+
+      - uses: docker/login-action@v3
+        with:
+          registry: ghcr.io
+          username: ${{ github.actor }}
+          password: ${{ secrets.GITHUB_TOKEN }}
+
+      - uses: docker/setup-buildx-action@v3
+
+      - uses: docker/build-push-action@v6
+        with:
+          context: .
+          file: Dockerfile.video
+          push: true
+          tags: |
+            ${{ env.IMAGE_PREFIX }}-video:latest
+            ${{ env.IMAGE_PREFIX }}-video:${{ github.sha }}
+          cache-from: type=gha,scope=video
+          cache-to: type=gha,mode=max,scope=video
+
+  update-runpod:
+    needs: [build-audio, build-images, build-video]
+    if: always() && !cancelled()
+    runs-on: ubuntu-latest
+    steps:
+      - name: Update RunPod templates
+        env:
+          RUNPOD_API_KEY: ${{ secrets.RUNPOD_API_KEY }}
+        run: |
+          SHA="${{ github.sha }}"
+          PREFIX="ghcr.io/${{ github.repository_owner }}/yt-factory"
+
+          # Audio template (lnri07h5s2)
+          curl -s -X POST https://api.runpod.io/graphql \
+            -H "Content-Type: application/json" \
+            -H "Authorization: Bearer $RUNPOD_API_KEY" \
+            -d "{\"query\": \"mutation { saveTemplate(input: { id: \\\"lnri07h5s2\\\", name: \\\"yt-factory-audio\\\", imageName: \\\"${PREFIX}-audio:${SHA}\\\", containerDiskInGb: 20, isServerless: true, env: [] }) { id name imageName } }\"}"
+
+          echo ""
+
+          # Images template (7y8167cpbf)
+          curl -s -X POST https://api.runpod.io/graphql \
+            -H "Content-Type: application/json" \
+            -H "Authorization: Bearer $RUNPOD_API_KEY" \
+            -d "{\"query\": \"mutation { saveTemplate(input: { id: \\\"7y8167cpbf\\\", name: \\\"yt-factory-images\\\", imageName: \\\"${PREFIX}-images:${SHA}\\\", containerDiskInGb: 20, isServerless: true, env: [] }) { id name imageName } }\"}"
+
+          echo ""
+
+          # Video template (5ejm0u3xrt)
+          curl -s -X POST https://api.runpod.io/graphql \
+            -H "Content-Type: application/json" \
+            -H "Authorization: Bearer $RUNPOD_API_KEY" \
+            -d "{\"query\": \"mutation { saveTemplate(input: { id: \\\"5ejm0u3xrt\\\", name: \\\"yt-factory-video\\\", imageName: \\\"${PREFIX}-video:${SHA}\\\", containerDiskInGb: 20, isServerless: true, env: [] }) { id name imageName } }\"}"
+
+          echo ""
+          echo "=== RunPod templates updated to SHA: ${SHA} ==="
