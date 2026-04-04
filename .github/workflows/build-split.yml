@@ -3,11 +3,6 @@ name: Build & Push Split Docker Images
 on:
   push:
     branches: [main]
-    paths:
-      - 'Dockerfile.*'
-      - 'handler_*.py'
-      - 'start_*.sh'
-      - 'extra_model_paths.yaml'
   workflow_dispatch:
     inputs:
       target:
@@ -20,11 +15,42 @@ env:
   IMAGE_PREFIX: ghcr.io/peperay/yt-factory
 
 jobs:
+  # ── Detect which files changed ──────────────────────────────
+  changes:
+    runs-on: ubuntu-latest
+    outputs:
+      audio: ${{ steps.filter.outputs.audio }}
+      images: ${{ steps.filter.outputs.images }}
+      video: ${{ steps.filter.outputs.video }}
+      shared: ${{ steps.filter.outputs.shared }}
+    steps:
+      - uses: actions/checkout@v4
+      - uses: dorny/paths-filter@v3
+        id: filter
+        with:
+          filters: |
+            audio:
+              - 'Dockerfile.audio'
+              - 'handler_audio.py'
+              - 'start_audio.sh'
+            images:
+              - 'Dockerfile.images'
+              - 'handler_images.py'
+              - 'start_images.sh'
+            video:
+              - 'Dockerfile.video'
+              - 'handler_video.py'
+              - 'start_video.sh'
+            shared:
+              - 'extra_model_paths.yaml'
+
   build-audio:
+    needs: changes
     if: >-
       github.event_name == 'workflow_dispatch' &&
       (github.event.inputs.target == 'all' || github.event.inputs.target == 'audio') ||
-      github.event_name == 'push'
+      github.event_name == 'push' &&
+      (needs.changes.outputs.audio == 'true' || needs.changes.outputs.shared == 'true')
     runs-on: ubuntu-latest
     permissions:
       contents: read
@@ -52,10 +78,12 @@ jobs:
           cache-to: type=gha,mode=max,scope=audio
 
   build-images:
+    needs: changes
     if: >-
       github.event_name == 'workflow_dispatch' &&
       (github.event.inputs.target == 'all' || github.event.inputs.target == 'images') ||
-      github.event_name == 'push'
+      github.event_name == 'push' &&
+      (needs.changes.outputs.images == 'true' || needs.changes.outputs.shared == 'true')
     runs-on: ubuntu-latest
     permissions:
       contents: read
@@ -83,10 +111,12 @@ jobs:
           cache-to: type=gha,mode=max,scope=images
 
   build-video:
+    needs: changes
     if: >-
       github.event_name == 'workflow_dispatch' &&
       (github.event.inputs.target == 'all' || github.event.inputs.target == 'video') ||
-      github.event_name == 'push'
+      github.event_name == 'push' &&
+      (needs.changes.outputs.video == 'true' || needs.changes.outputs.shared == 'true')
     runs-on: ubuntu-latest
     permissions:
       contents: read
@@ -115,7 +145,7 @@ jobs:
 
   update-runpod:
     needs: [build-audio, build-images, build-video]
-    if: always() && !cancelled()
+    if: always() && (needs.build-audio.result == 'success' || needs.build-images.result == 'success' || needs.build-video.result == 'success')
     runs-on: ubuntu-latest
     steps:
       - name: Update RunPod templates
@@ -125,27 +155,27 @@ jobs:
           SHA="${{ github.sha }}"
           PREFIX="ghcr.io/peperay/yt-factory"
 
-          # Audio template (lnri07h5s2)
-          curl -s -X POST https://api.runpod.io/graphql \
-            -H "Content-Type: application/json" \
-            -H "Authorization: Bearer $RUNPOD_API_KEY" \
-            -d "{\"query\": \"mutation { saveTemplate(input: { id: \\\"lnri07h5s2\\\", name: \\\"yt-factory-audio\\\", imageName: \\\"${PREFIX}-audio:${SHA}\\\", containerDiskInGb: 20, isServerless: true, env: [] }) { id name imageName } }\"}"
+          update_template() {
+            local id=$1 name=$2 image=$3
+            echo "Updating $name → $image"
+            curl -s -X POST https://api.runpod.io/graphql \
+              -H "Content-Type: application/json" \
+              -H "Authorization: Bearer $RUNPOD_API_KEY" \
+              -d "{\"query\": \"mutation { saveTemplate(input: { id: \\\"$id\\\", name: \\\"$name\\\", imageName: \\\"$image\\\", containerDiskInGb: 20, volumeInGb: 0, dockerArgs: \\\"\\\", env: [] }) { id name imageName } }\"}"
+            echo ""
+          }
 
-          echo ""
+          # Only update templates for endpoints that were rebuilt
+          if [ "${{ needs.build-audio.result }}" == "success" ]; then
+            update_template "lnri07h5s2" "yt-factory-audio" "${PREFIX}-audio:${SHA}"
+          fi
 
-          # Images template (7y8167cpbf)
-          curl -s -X POST https://api.runpod.io/graphql \
-            -H "Content-Type: application/json" \
-            -H "Authorization: Bearer $RUNPOD_API_KEY" \
-            -d "{\"query\": \"mutation { saveTemplate(input: { id: \\\"7y8167cpbf\\\", name: \\\"yt-factory-images\\\", imageName: \\\"${PREFIX}-images:${SHA}\\\", containerDiskInGb: 20, isServerless: true, env: [] }) { id name imageName } }\"}"
+          if [ "${{ needs.build-images.result }}" == "success" ]; then
+            update_template "7y8167cpbf" "yt-factory-images" "${PREFIX}-images:${SHA}"
+          fi
 
-          echo ""
+          if [ "${{ needs.build-video.result }}" == "success" ]; then
+            update_template "5ejm0u3xrt" "yt-factory-video" "${PREFIX}-video:${SHA}"
+          fi
 
-          # Video template (5ejm0u3xrt)
-          curl -s -X POST https://api.runpod.io/graphql \
-            -H "Content-Type: application/json" \
-            -H "Authorization: Bearer $RUNPOD_API_KEY" \
-            -d "{\"query\": \"mutation { saveTemplate(input: { id: \\\"5ejm0u3xrt\\\", name: \\\"yt-factory-video\\\", imageName: \\\"${PREFIX}-video:${SHA}\\\", containerDiskInGb: 20, isServerless: true, env: [] }) { id name imageName } }\"}"
-
-          echo ""
-          echo "=== RunPod templates updated to SHA: ${SHA} ==="
+          echo "=== RunPod templates updated (SHA: ${SHA}) ==="

@@ -1,7 +1,7 @@
 # ============================================================
 # YouTube Factory — Video Endpoint (LTX-Video 2.3 + FFmpeg)
 # Job types: img-vid, compose
-# Optimized: Only video nodes, NO audio TTS / image gen deps
+# Optimized: Only video nodes from test_v2_img-vid workflow
 # ============================================================
 
 ARG BASE_IMAGE=nvidia/cuda:12.6.3-cudnn-runtime-ubuntu24.04
@@ -24,11 +24,7 @@ RUN apt-get update && apt-get install -y \
     wget \
     libgl1 \
     libglib2.0-0 \
-    libsm6 \
-    libxext6 \
-    libxrender1 \
     ffmpeg \
-    build-essential \
     && ln -sf /usr/bin/python3.12 /usr/bin/python \
     && ln -sf /usr/bin/pip3 /usr/bin/pip \
     && apt-get autoremove -y && apt-get clean -y && rm -rf /var/lib/apt/lists/*
@@ -58,16 +54,21 @@ RUN grep -v -i -E '^(torch==|torch>=|torch<=|torchvision==|torchvision>=|torchau
 COPY extra_model_paths.yaml ./
 
 # ── Custom Nodes: VIDEO ONLY ────────────────────────────────
-# LTX-Video, VideoHelperSuite, KJNodes
+# What test_v2_img-vid workflow uses:
+#   LTXV* nodes → comfyui-ltxvideo
+#   VHS_VideoCombine → comfyui-videohelpersuite
+#   VAELoaderKJ, ResizeImagesByLongerEdge, ImageResizeKJv2 → comfyui-kjnodes
+#   MathExpression|pysssss → comfyui-custom-scripts
+#   UnetLoaderGGUF → comfyui-gguf (WAS MISSING — FIXED)
+#   Power Lora Loader, Any Switch → rgthree-comfy (WAS MISSING — FIXED)
+#   CM_IntToFloat → comfymath
 RUN comfy node install comfyui-ltxvideo || true && \
     comfy node install comfyui-videohelpersuite || true && \
     comfy node install comfyui-kjnodes || true && \
-    comfy node install comfyui-custom-scripts || true
-
-# RES4LYF (video enhancement, linked from Network Volume at runtime)
-# Its Python deps must be pre-installed here
-RUN cd custom_nodes \
-    && (git clone https://github.com/vrgamedevgirl/comfyui-vrgamedevgirl.git 2>/dev/null || true)
+    comfy node install comfyui-custom-scripts || true && \
+    comfy node install comfyui-gguf || true && \
+    comfy node install rgthree-comfy || true && \
+    comfy node install comfymath || true
 
 WORKDIR /
 
@@ -75,11 +76,7 @@ WORKDIR /
 RUN uv pip install \
     opencv-python \
     av \
-    scipy \
-    matplotlib \
-    pywavelets \
-    alembic \
-    aiohttp \
+    gguf \
     && echo "=== Video deps installed ==="
 
 # ── Restore critical packages ───────────────────────────────
@@ -95,7 +92,7 @@ RUN cd /comfyui \
     && rm /tmp/comfy_reqs_final.txt \
     && echo "=== ComfyUI deps restored ==="
 
-RUN uv pip install comfy-aimdo torchsde comfyui-frontend-package comfy-kitchen blake3 simpleeval \
+RUN uv pip install comfy-aimdo comfyui-frontend-package simpleeval \
     && echo "=== explicit runtime deps installed ==="
 
 # ── Verify environment ──────────────────────────────────────
@@ -104,7 +101,6 @@ import torch; \
 import torchvision; \
 import torchaudio; \
 import numpy; \
-import comfy_aimdo; \
 import av; \
 print(f'torch={torch.__version__}, numpy={numpy.__version__}'); \
 print('=== Video endpoint environment verified ===')"

@@ -1,7 +1,7 @@
 # ============================================================
 # YouTube Factory — Images Endpoint (Flux 2 Klein + LoRAs)
 # Job types: txt-img
-# Optimized: Only image generation nodes, NO audio/video deps
+# Optimized: Only image generation nodes from TXT-IMG_API workflow
 # ============================================================
 
 ARG BASE_IMAGE=nvidia/cuda:12.6.3-cudnn-runtime-ubuntu24.04
@@ -15,7 +15,7 @@ ENV PIP_PREFER_BINARY=1
 ENV PYTHONUNBUFFERED=1
 ENV CMAKE_BUILD_PARALLEL_LEVEL=8
 
-# System dependencies (no libsndfile needed)
+# System dependencies
 RUN apt-get update && apt-get install -y \
     python3.12 \
     python3.12-venv \
@@ -24,11 +24,7 @@ RUN apt-get update && apt-get install -y \
     wget \
     libgl1 \
     libglib2.0-0 \
-    libsm6 \
-    libxext6 \
-    libxrender1 \
     ffmpeg \
-    build-essential \
     && ln -sf /usr/bin/python3.12 /usr/bin/python \
     && ln -sf /usr/bin/pip3 /usr/bin/pip \
     && apt-get autoremove -y && apt-get clean -y && rm -rf /var/lib/apt/lists/*
@@ -58,30 +54,13 @@ RUN grep -v -i -E '^(torch==|torch>=|torch<=|torchvision==|torchvision>=|torchau
 COPY extra_model_paths.yaml ./
 
 # ── Custom Nodes: IMAGE ONLY ────────────────────────────────
-# GGUF (Flux Klein), Detail Daemon, KJNodes, Essentials, LoRA tools
+# Only what TXT-IMG_API workflow uses:
+#   UnetLoaderGGUF → comfyui-gguf
+#   DetailDaemonSamplerNode → comfyui-detail-daemon
+#   Power Lora Loader → rgthree-comfy
 RUN comfy node install comfyui-gguf || true && \
     comfy node install comfyui-detail-daemon || true && \
-    comfy node install comfyui-kjnodes || true && \
-    comfy node install comfyui-ttp-toolset || true && \
-    comfy node install rgthree-comfy || true && \
-    comfy node install comfymath || true && \
-    comfy node install comfyui-impact-pack || true && \
-    comfy node install comfyui-custom-scripts || true
-
-# Git-based nodes for image workflows
-RUN cd custom_nodes \
-    && git clone https://github.com/cubiq/ComfyUI_essentials.git \
-    && (cd ComfyUI_essentials && pip install -r requirements.txt 2>/dev/null || true) \
-    && git clone https://github.com/yolain/ComfyUI-Easy-Use.git \
-    && (cd ComfyUI-Easy-Use && pip install -r requirements.txt 2>/dev/null || true) \
-    ; cd /comfyui/custom_nodes \
-    && (git clone https://github.com/TTPlanetPig/Comfyui_TTP_Toolset.git \
-        && cd Comfyui_TTP_Toolset && pip install -r requirements.txt 2>/dev/null || true) \
-    ; cd /comfyui/custom_nodes \
-    && (git clone https://github.com/Fannovel16/comfyui_controlnet_aux.git \
-        && cd comfyui_controlnet_aux && pip install -r requirements.txt 2>/dev/null || true) \
-    ; cd /comfyui/custom_nodes \
-    && (git clone https://github.com/wallish77/wlsh_nodes.git 2>/dev/null || true)
+    comfy node install rgthree-comfy || true
 
 WORKDIR /
 
@@ -89,8 +68,6 @@ WORKDIR /
 RUN uv pip install \
     opencv-python \
     gguf \
-    piexif \
-    aiohttp \
     && echo "=== Image deps installed ==="
 
 # ── Restore critical packages ───────────────────────────────
@@ -106,7 +83,7 @@ RUN cd /comfyui \
     && rm /tmp/comfy_reqs_final.txt \
     && echo "=== ComfyUI deps restored ==="
 
-RUN uv pip install comfy-aimdo torchsde comfyui-frontend-package comfy-kitchen blake3 simpleeval \
+RUN uv pip install comfy-aimdo comfyui-frontend-package simpleeval \
     && echo "=== explicit runtime deps installed ==="
 
 # ── Verify environment ──────────────────────────────────────
@@ -114,7 +91,6 @@ RUN python -c "\
 import torch; \
 import torchvision; \
 import numpy; \
-import comfy_aimdo; \
 import gguf; \
 print(f'torch={torch.__version__}, numpy={numpy.__version__}'); \
 print('=== Images endpoint environment verified ===')"
