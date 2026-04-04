@@ -239,7 +239,7 @@ def handler(job):
     ws_url = f"ws://{COMFY_HOST}/ws?clientId={client_id}"
     try:
         ws = websocket.WebSocket()
-        ws.settimeout(30)
+        ws.settimeout(COMFY_EXECUTION_TIMEOUT)
         ws.connect(ws_url)
     except Exception as e:
         return {"error": f"Failed to connect websocket: {str(e)}"}
