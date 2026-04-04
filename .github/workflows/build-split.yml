@@ -17,7 +17,7 @@ on:
 
 env:
   REGISTRY: ghcr.io
-  IMAGE_PREFIX: ghcr.io/${{ github.repository_owner }}/yt-factory
+  IMAGE_PREFIX: ghcr.io/peperay/yt-factory
 
 jobs:
   build-audio:
@@ -123,7 +123,7 @@ jobs:
           RUNPOD_API_KEY: ${{ secrets.RUNPOD_API_KEY }}
         run: |
           SHA="${{ github.sha }}"
-          PREFIX="ghcr.io/${{ github.repository_owner }}/yt-factory"
+          PREFIX="ghcr.io/peperay/yt-factory"
 
           # Audio template (lnri07h5s2)
           curl -s -X POST https://api.runpod.io/graphql \
