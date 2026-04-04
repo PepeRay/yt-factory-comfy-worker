@@ -57,20 +57,6 @@
       "title": "Detail Daemon Sampler"
     }
   },
-  "30": {
-    "inputs": {
-      "strength": 0.1,
-      "use_gpu": true,
-      "images": [
-        "119:105",
-        0
-      ]
-    },
-    "class_type": "FastLaplacianSharpen",
-    "_meta": {
-      "title": "🌀 Fast Laplacian Sharpen"
-    }
-  },
   "33": {
     "inputs": {
       "text": "add more details with DETAILER ",
@@ -88,58 +74,13 @@
     "inputs": {
       "filename_prefix": "Flux2-Klein",
       "images": [
-        "119:41",
+        "119:110",
         0
       ]
     },
     "class_type": "SaveImage",
     "_meta": {
       "title": "Save Image"
-    }
-  },
-  "43": {
-    "inputs": {
-      "grain_intensity": 0.012,
-      "saturation_mix": 0.30000000000000004,
-      "batch_size": 4,
-      "images": [
-        "30",
-        0
-      ]
-    },
-    "class_type": "FastFilmGrain",
-    "_meta": {
-      "title": "🎞️ Fast Film Grain"
-    }
-  },
-  "44": {
-    "inputs": {
-      "rgthree_comparer": {
-        "images": [
-          {
-            "name": "A",
-            "selected": true,
-            "url": "/api/view?filename=rgthree.compare._temp_knzay_00001_.png&type=temp&subfolder=&rand=0.2885434039295991"
-          },
-          {
-            "name": "B",
-            "selected": true,
-            "url": "/api/view?filename=rgthree.compare._temp_knzay_00002_.png&type=temp&subfolder=&rand=0.9732756525283075"
-          }
-        ]
-      },
-      "image_a": [
-        "119:112",
-        0
-      ],
-      "image_b": [
-        "119:41",
-        0
-      ]
-    },
-    "class_type": "Image Comparer (rgthree)",
-    "_meta": {
-      "title": "Image Comparer (rgthree)"
     }
   },
   "47": {
@@ -389,18 +330,6 @@
       "title": "Empty Flux 2 Latent"
     }
   },
-  "119:104": {
-    "inputs": {
-      "anything": [
-        "119:110",
-        0
-      ]
-    },
-    "class_type": "easy cleanGpuUsed",
-    "_meta": {
-      "title": "Clean VRAM Used"
-    }
-  },
   "119:106": {
     "inputs": {
       "noise": [
@@ -592,37 +521,6 @@
     "class_type": "Flux2Scheduler",
     "_meta": {
       "title": "Flux2Scheduler"
-    }
-  },
-  "119:105": {
-    "inputs": {
-      "anything": [
-        "119:104",
-        0
-      ]
-    },
-    "class_type": "easy clearCacheAll",
-    "_meta": {
-      "title": "Clear Cache All"
-    }
-  },
-  "119:41": {
-    "inputs": {
-      "method": "mkl",
-      "strength": 0.8,
-      "multithread": true,
-      "image_ref": [
-        "119:112",
-        0
-      ],
-      "image_target": [
-        "43",
-        0
-      ]
-    },
-    "class_type": "ColorMatch",
-    "_meta": {
-      "title": "Color Match"
     }
   },
   "119:109": {
