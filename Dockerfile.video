@@ -93,6 +93,7 @@ RUN cd /comfyui \
     && echo "=== ComfyUI deps restored ==="
 
 RUN uv pip install comfy-aimdo comfyui-frontend-package simpleeval \
+    sqlalchemy alembic \
     && echo "=== explicit runtime deps installed ==="
 
 # ── Verify environment ──────────────────────────────────────
