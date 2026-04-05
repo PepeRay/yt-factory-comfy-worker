@@ -83,16 +83,23 @@ RUN cd /comfyui \
     && rm /tmp/comfy_reqs_final.txt \
     && echo "=== ComfyUI deps restored ==="
 
-RUN uv pip install comfy-aimdo comfyui-frontend-package simpleeval \
+RUN uv pip install comfy-aimdo torchsde comfyui-frontend-package comfy-kitchen blake3 simpleeval \
     sqlalchemy alembic \
     && echo "=== explicit runtime deps installed ==="
 
-# ── Verify environment ──────────────────────────────────────
+# ── Verify environment (build-time gate) ────────────────────
+# If any import fails, the build fails — no broken images pushed.
 RUN python -c "\
 import torch; \
 import torchvision; \
 import numpy; \
+import comfy_aimdo; \
+import sqlalchemy; \
+import alembic; \
+import kornia; \
+import PIL; \
 import gguf; \
+import blake3; \
 print(f'torch={torch.__version__}, numpy={numpy.__version__}'); \
 print('=== Images endpoint environment verified ===')"
 

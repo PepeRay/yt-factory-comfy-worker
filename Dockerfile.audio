@@ -1,7 +1,7 @@
 # ============================================================
 # YouTube Factory — Audio Endpoint (VibeVoice TTS + Whisper STT)
 # Job types: txt-voice, voice-srt
-# Optimized: Minimal deps for audio-only workflows
+# Based on: proven monolithic Dockerfile (bf1e0f3, 18 iterations)
 # ============================================================
 
 ARG BASE_IMAGE=nvidia/cuda:12.6.3-cudnn-runtime-ubuntu24.04
@@ -15,17 +15,20 @@ ENV PIP_PREFER_BINARY=1
 ENV PYTHONUNBUFFERED=1
 ENV CMAKE_BUILD_PARALLEL_LEVEL=8
 
-# System dependencies (audio-focused)
+# System dependencies (same as proven monolithic)
 RUN apt-get update && apt-get install -y \
     python3.12 \
     python3.12-venv \
     python3.12-dev \
     git \
     wget \
-    ffmpeg \
-    libsndfile1 \
     libgl1 \
     libglib2.0-0 \
+    libsm6 \
+    libxext6 \
+    libxrender1 \
+    ffmpeg \
+    libsndfile1 \
     build-essential \
     && ln -sf /usr/bin/python3.12 /usr/bin/python \
     && ln -sf /usr/bin/pip3 /usr/bin/pip \
@@ -56,12 +59,13 @@ RUN grep -v -i -E '^(torch==|torch>=|torch<=|torchvision==|torchvision>=|torchau
 COPY extra_model_paths.yaml ./
 
 # ── Custom Nodes: AUDIO ONLY ────────────────────────────────
-# Whisper (STT) + VHS (VHS_LoadAudio) + custom-scripts (PreviewAny)
+# From proven monolithic, minus image/video nodes (gguf, ltxvideo, detail-daemon, etc.)
 RUN comfy node install comfyui-whisper || true && \
     comfy node install comfyui-videohelpersuite || true && \
+    comfy node install comfyui-kjnodes || true && \
     comfy node install comfyui-custom-scripts || true
 
-# VibeVoice (TTS) — fallback if Network Volume unavailable
+# VibeVoice + TTS-Audio-Suite (from git — same as proven monolithic)
 RUN cd custom_nodes \
     && (git clone https://github.com/DualOrion/VibeVoice-ComfyUI.git \
         && cd VibeVoice-ComfyUI && pip install -r requirements.txt 2>/dev/null \
@@ -73,45 +77,59 @@ RUN cd custom_nodes \
 
 WORKDIR /
 
-# ── Audio deps: only what workflows need ────────────────────
-# VibeVoice core deps (NV version may import any of these)
+# ── Audio/ML dependencies (IDENTICAL to proven monolithic) ──
 RUN uv pip install \
     "transformers>=4.40,<5.0" \
     accelerate \
+    diffusers \
     peft \
-    bitsandbytes \
     datasets \
     scipy \
     librosa \
     soundfile \
     sounddevice \
     av \
+    aiortc \
+    bitsandbytes \
+    ml-collections \
+    absl-py \
     omegaconf \
     dacite \
-    echo-tts \
-    vocos \
-    x-transformers \
     conformer \
+    x-transformers \
     torchdiffeq \
     ema-pytorch \
+    vocos \
+    echo-tts \
     monotonic-alignment-search \
-    && echo "=== VibeVoice deps installed ==="
+    && echo "=== Audio/ML deps installed ==="
 
-# TTS-Audio-Suite deps (NV version imports these at startup)
+# TTS-Audio-Suite specific deps (IDENTICAL to proven monolithic)
 RUN uv pip install \
+    jieba \
+    pypinyin \
     unidecode \
     phonemizer \
+    cn2an \
     g2p-en \
     inflect \
     sentencepiece \
-    openai-whisper \
+    textstat \
+    punctuators \
+    funasr \
+    nagisa \
     hyperpyyaml \
+    modelscope \
     munch \
     json5 \
+    faiss-cpu \
     praat-parselmouth \
     pyworld \
     torchfcpe \
-    && echo "=== TTS-Audio-Suite deps installed ==="
+    wandb \
+    keras \
+    openai-whisper \
+    && echo "=== TTS deps installed ==="
 
 # ── Restore critical packages ───────────────────────────────
 RUN uv pip install --force-reinstall \
@@ -130,12 +148,22 @@ RUN uv pip install comfy-aimdo torchsde comfyui-frontend-package comfy-kitchen b
     sqlalchemy alembic \
     && echo "=== explicit runtime deps installed ==="
 
-# ── Verify environment ──────────────────────────────────────
+# ── Verify environment (build-time gate) ────────────────────
+# If any import fails, the build fails — no broken images pushed.
 RUN python -c "\
 import torch; \
 import torchaudio; \
 import numpy; \
+import comfy_aimdo; \
+import torchsde; \
+import alembic; \
+import sqlalchemy; \
+import kornia; \
+import av; \
+import PIL; \
 import transformers; \
+import pydantic; \
+import blake3; \
 print(f'torch={torch.__version__}, numpy={numpy.__version__}'); \
 print('=== Audio endpoint environment verified ===')"
 
