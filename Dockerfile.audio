@@ -60,10 +60,20 @@ COPY extra_model_paths.yaml ./
 
 # ── Custom Nodes: AUDIO ONLY ────────────────────────────────
 # From proven monolithic, minus image/video nodes (gguf, ltxvideo, detail-daemon, etc.)
-RUN comfy node install comfyui-whisper || true && \
-    comfy node install comfyui-videohelpersuite || true && \
-    comfy node install comfyui-kjnodes || true && \
-    comfy node install comfyui-custom-scripts || true
+# Each install separated to isolate failures
+RUN comfy node install comfyui-whisper || true
+RUN comfy node install comfyui-videohelpersuite || true
+RUN comfy node install comfyui-kjnodes || true
+RUN comfy node install comfyui-custom-scripts || true
+
+# Verify VHS installed (VHS_LoadAudio needed for voice-srt)
+RUN test -d /comfyui/custom_nodes/ComfyUI-VideoHelperSuite \
+    && echo "=== VHS installed ===" \
+    || (echo "ERROR: VHS not installed, trying pip fallback" \
+        && cd /comfyui/custom_nodes \
+        && git clone https://github.com/Kosinkadink/ComfyUI-VideoHelperSuite.git \
+        && cd ComfyUI-VideoHelperSuite \
+        && pip install -r requirements.txt 2>/dev/null || true)
 
 # VibeVoice + TTS-Audio-Suite (from git — same as proven monolithic)
 RUN cd custom_nodes \
@@ -79,7 +89,7 @@ WORKDIR /
 
 # ── Audio/ML dependencies (IDENTICAL to proven monolithic) ──
 RUN uv pip install \
-    "transformers>=4.40,<5.0" \
+    "transformers>=4.51.3,<5.0" \
     accelerate \
     diffusers \
     peft \
@@ -164,7 +174,9 @@ import PIL; \
 import transformers; \
 import pydantic; \
 import blake3; \
-print(f'torch={torch.__version__}, numpy={numpy.__version__}'); \
+from packaging.version import Version; \
+assert Version(transformers.__version__) >= Version('4.51.3'), f'transformers {transformers.__version__} < 4.51.3 (VibeVoice requires >=4.51.3)'; \
+print(f'torch={torch.__version__}, numpy={numpy.__version__}, transformers={transformers.__version__}'); \
 print('=== Audio endpoint environment verified ===')"
 
 # ── Handler ──────────────────────────────────────────────────
