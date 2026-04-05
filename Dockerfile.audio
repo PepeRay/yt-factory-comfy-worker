@@ -62,18 +62,16 @@ COPY extra_model_paths.yaml ./
 # From proven monolithic, minus image/video nodes (gguf, ltxvideo, detail-daemon, etc.)
 # Each install separated to isolate failures
 RUN comfy node install comfyui-whisper || true
-RUN comfy node install comfyui-videohelpersuite || true
 RUN comfy node install comfyui-kjnodes || true
 RUN comfy node install comfyui-custom-scripts || true
 
-# Verify VHS installed (VHS_LoadAudio needed for voice-srt)
-RUN test -d /comfyui/custom_nodes/ComfyUI-VideoHelperSuite \
-    && echo "=== VHS installed ===" \
-    || (echo "ERROR: VHS not installed, trying pip fallback" \
-        && cd /comfyui/custom_nodes \
-        && git clone https://github.com/Kosinkadink/ComfyUI-VideoHelperSuite.git \
-        && cd ComfyUI-VideoHelperSuite \
-        && pip install -r requirements.txt 2>/dev/null || true)
+# VHS (VHS_LoadAudio needed for voice-srt) — git clone is more reliable than comfy node install
+RUN cd /comfyui/custom_nodes \
+    && rm -rf ComfyUI-VideoHelperSuite 2>/dev/null || true \
+    && git clone https://github.com/Kosinkadink/ComfyUI-VideoHelperSuite.git \
+    && cd ComfyUI-VideoHelperSuite \
+    && (pip install -r requirements.txt 2>/dev/null || true) \
+    && echo "=== VHS installed via git clone ==="
 
 # VibeVoice + TTS-Audio-Suite (from git — same as proven monolithic)
 RUN cd custom_nodes \
@@ -161,6 +159,7 @@ RUN uv pip install comfy-aimdo torchsde comfyui-frontend-package comfy-kitchen b
 # ── Verify environment (build-time gate) ────────────────────
 # If any import fails, the build fails — no broken images pushed.
 RUN python -c "\
+import os; \
 import torch; \
 import torchaudio; \
 import numpy; \
@@ -176,6 +175,8 @@ import pydantic; \
 import blake3; \
 from packaging.version import Version; \
 assert Version(transformers.__version__) >= Version('4.51.3'), f'transformers {transformers.__version__} < 4.51.3 (VibeVoice requires >=4.51.3)'; \
+assert os.path.isdir('/comfyui/custom_nodes/ComfyUI-VideoHelperSuite'), 'VHS not installed — VHS_LoadAudio will fail'; \
+assert os.path.isfile('/comfyui/custom_nodes/ComfyUI-VideoHelperSuite/__init__.py'), 'VHS __init__.py missing'; \
 print(f'torch={torch.__version__}, numpy={numpy.__version__}, transformers={transformers.__version__}'); \
 print('=== Audio endpoint environment verified ===')"
 
