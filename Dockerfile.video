@@ -93,7 +93,7 @@ RUN cd /comfyui \
     && echo "=== ComfyUI deps restored ==="
 
 RUN uv pip install comfy-aimdo torchsde comfyui-frontend-package comfy-kitchen blake3 simpleeval \
-    sqlalchemy alembic \
+    sqlalchemy alembic kornia \
     && echo "=== explicit runtime deps installed ==="
 
 # ── Verify environment (build-time gate) ────────────────────
