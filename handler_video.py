@@ -212,8 +212,256 @@ def run_compose(channel, content_id, platform, compose_config):
         return _compose_concat_video(src, dest, content_id)
     elif compose_type == "full":
         return _compose_full(src, dest, content_id, compose_config)
+    elif compose_type == "scene_manifest":
+        return _compose_scene_manifest(src, dest, content_id, compose_config)
     else:
         raise RuntimeError(f"Unknown compose type: {compose_type}")
+
+
+def _get_video_duration(path):
+    """Get video duration in seconds using ffprobe."""
+    cmd = [
+        "ffprobe", "-v", "error", "-show_entries", "format=duration",
+        "-of", "default=noprint_wrappers=1:nokey=1", path
+    ]
+    result = subprocess.run(cmd, capture_output=True, text=True, timeout=30)
+    if result.returncode != 0:
+        raise RuntimeError(f"ffprobe failed for {path}: {result.stderr[:200]}")
+    return float(result.stdout.strip())
+
+
+def _compose_scene_manifest(src, dest, content_id, config):
+    """
+    Compose full video from scenes.json v2 manifest.
+    Phase 1: Render each scene to a normalized segment (1920x1080, 30fps, h264)
+    Phase 2: Apply transitions between segments (cut, dissolve, fade_black, fade_white)
+    Phase 3: Mux with audio and optional subtitles
+    """
+    # Load scenes.json
+    scenes_path = config.get("scenes_path", os.path.join(src, "..", "config", "scenes.json"))
+    if not os.path.exists(scenes_path):
+        # Try alternate location
+        scenes_path = os.path.join(os.path.dirname(src), "config", "scenes.json")
+    if not os.path.exists(scenes_path):
+        raise RuntimeError(f"scenes.json not found at {scenes_path}")
+
+    with open(scenes_path, "r") as f:
+        scenes_data = json.load(f)
+
+    scenes = scenes_data.get("scenes", [])
+    if not scenes:
+        raise RuntimeError("scenes.json has no scenes")
+
+    img_dir = os.path.join(src, "images")
+    vid_dir = os.path.join(src, "video")
+    segments_dir = os.path.join(dest, "_segments")
+    os.makedirs(segments_dir, exist_ok=True)
+
+    WIDTH, HEIGHT, FPS = 1920, 1080, 30
+    NORM = f"-vf scale={WIDTH}:{HEIGHT}:force_original_aspect_ratio=decrease,pad={WIDTH}:{HEIGHT}:(ow-iw)/2:(oh-ih)/2,setsar=1 -r {FPS} -c:v libx264 -preset fast -crf 18 -pix_fmt yuv420p -an"
+
+    # ── Phase 1: Render each scene to a normalized segment ──
+    segment_paths = []
+    skipped = 0
+
+    for scene in scenes:
+        sid = scene["scene_id"]
+        render_type = scene.get("render_type", "ken_burns")
+        duration = scene.get("duration_sec", 5)
+        seg_path = os.path.join(segments_dir, f"seg_{sid:04d}.mp4")
+
+        try:
+            if render_type == "video_clip":
+                # Use LTX-generated clip, normalize it
+                clip_path = os.path.join(vid_dir, f"scene_{sid:03d}.mp4")
+                if not os.path.exists(clip_path):
+                    # Fallback: try with different naming
+                    candidates = glob_module.glob(os.path.join(vid_dir, f"*{sid:03d}*"))
+                    clip_path = candidates[0] if candidates else clip_path
+                if not os.path.exists(clip_path):
+                    print(f"WARN: scene {sid} video_clip missing {clip_path}, falling back to ken_burns")
+                    render_type = "ken_burns"
+                else:
+                    cmd = f"ffmpeg -y -i {clip_path} {NORM} {seg_path}"
+                    result = subprocess.run(cmd.split(), capture_output=True, text=True, timeout=120)
+                    if result.returncode != 0:
+                        raise RuntimeError(f"segment {sid} video_clip: {result.stderr[:200]}")
+                    segment_paths.append({"path": seg_path, "scene": scene})
+                    continue
+
+            if render_type == "crossfade":
+                # Crossfade between two images
+                img_a = os.path.join(img_dir, f"scene_{sid:03d}_initial.png")
+                img_b = os.path.join(img_dir, f"scene_{sid:03d}_final.png")
+                if not os.path.exists(img_a):
+                    print(f"WARN: scene {sid} crossfade missing initial image, skipping")
+                    skipped += 1
+                    continue
+                if not os.path.exists(img_b):
+                    # Fallback to ken_burns if no final image
+                    render_type = "ken_burns"
+                else:
+                    frames = int(duration * FPS)
+                    cmd = [
+                        "ffmpeg", "-y",
+                        "-loop", "1", "-i", img_a,
+                        "-loop", "1", "-i", img_b,
+                        "-filter_complex",
+                        f"[0:v]scale={WIDTH}:{HEIGHT},setsar=1,format=yuv420p[a];"
+                        f"[1:v]scale={WIDTH}:{HEIGHT},setsar=1,format=yuv420p[b];"
+                        f"[a][b]blend=all_expr='A*(1-T/{duration})+B*(T/{duration})':shortest=1",
+                        "-t", str(duration), "-r", str(FPS),
+                        "-c:v", "libx264", "-preset", "fast", "-crf", "18",
+                        "-pix_fmt", "yuv420p", seg_path
+                    ]
+                    result = subprocess.run(cmd, capture_output=True, text=True, timeout=120)
+                    if result.returncode != 0:
+                        raise RuntimeError(f"segment {sid} crossfade: {result.stderr[:200]}")
+                    segment_paths.append({"path": seg_path, "scene": scene})
+                    continue
+
+            if render_type == "ken_burns":
+                # Slow zoom on single image
+                img_path = os.path.join(img_dir, f"scene_{sid:03d}_initial.png")
+                if not os.path.exists(img_path):
+                    print(f"WARN: scene {sid} ken_burns missing image, skipping")
+                    skipped += 1
+                    continue
+                frames = int(duration * FPS)
+                # Zoom from 1.0x to 1.15x centered
+                cmd = [
+                    "ffmpeg", "-y", "-i", img_path,
+                    "-filter_complex",
+                    f"scale=8000:-1,"
+                    f"zoompan=z='1+0.15*on/{frames}':x='iw/2-(iw/zoom/2)':y='ih/2-(ih/zoom/2)'"
+                    f":d={frames}:s={WIDTH}x{HEIGHT}:fps={FPS},"
+                    f"format=yuv420p",
+                    "-t", str(duration),
+                    "-c:v", "libx264", "-preset", "fast", "-crf", "18",
+                    seg_path
+                ]
+                result = subprocess.run(cmd, capture_output=True, text=True, timeout=120)
+                if result.returncode != 0:
+                    raise RuntimeError(f"segment {sid} ken_burns: {result.stderr[:200]}")
+                segment_paths.append({"path": seg_path, "scene": scene})
+
+        except Exception as e:
+            print(f"ERROR scene {sid}: {e}")
+            skipped += 1
+
+    if not segment_paths:
+        raise RuntimeError("No segments rendered successfully")
+
+    print(f"Phase 1 done: {len(segment_paths)} segments, {skipped} skipped")
+
+    # ── Phase 2: Apply transitions ──
+    merged_path = segment_paths[0]["path"]
+
+    for i in range(1, len(segment_paths)):
+        seg = segment_paths[i]
+        scene = seg["scene"]
+        transition = scene.get("transition_in", "cut")
+        t_dur = scene.get("transition_duration_sec", 0)
+
+        if transition == "cut" or t_dur <= 0:
+            # Simple concat (no re-encode)
+            concat_out = os.path.join(segments_dir, f"merged_{i:04d}.mp4")
+            concat_list = os.path.join(segments_dir, f"concat_{i}.txt")
+            with open(concat_list, "w") as f:
+                f.write(f"file '{merged_path}'\nfile '{seg['path']}'\n")
+            cmd = [
+                "ffmpeg", "-y", "-f", "concat", "-safe", "0",
+                "-i", concat_list, "-c", "copy", concat_out
+            ]
+            result = subprocess.run(cmd, capture_output=True, text=True, timeout=300)
+            os.remove(concat_list)
+            if result.returncode != 0:
+                print(f"WARN: concat {i} failed, trying re-encode")
+                cmd = [
+                    "ffmpeg", "-y", "-f", "concat", "-safe", "0",
+                    "-i", concat_list, "-c:v", "libx264", "-preset", "fast",
+                    "-crf", "18", concat_out
+                ]
+                # Recreate concat list for retry
+                with open(concat_list, "w") as f:
+                    f.write(f"file '{merged_path}'\nfile '{seg['path']}'\n")
+                result = subprocess.run(cmd, capture_output=True, text=True, timeout=300)
+                os.remove(concat_list)
+            merged_path = concat_out
+        else:
+            # xfade transition (dissolve, fadeblack, fadewhite)
+            xfade_name = {
+                "dissolve": "dissolve",
+                "fade_black": "fadeblack",
+                "fade_white": "fadewhite",
+            }.get(transition, "dissolve")
+
+            merged_dur = _get_video_duration(merged_path)
+            offset = max(0, merged_dur - t_dur)
+            xfade_out = os.path.join(segments_dir, f"merged_{i:04d}.mp4")
+
+            cmd = [
+                "ffmpeg", "-y", "-i", merged_path, "-i", seg["path"],
+                "-filter_complex",
+                f"[0:v][1:v]xfade=transition={xfade_name}:duration={t_dur}:offset={offset}",
+                "-c:v", "libx264", "-preset", "fast", "-crf", "18",
+                "-pix_fmt", "yuv420p", xfade_out
+            ]
+            result = subprocess.run(cmd, capture_output=True, text=True, timeout=300)
+            if result.returncode != 0:
+                print(f"WARN: xfade {transition} failed at scene {scene['scene_id']}, falling back to cut")
+                # Fallback to concat
+                concat_list = os.path.join(segments_dir, f"concat_{i}.txt")
+                with open(concat_list, "w") as f:
+                    f.write(f"file '{merged_path}'\nfile '{seg['path']}'\n")
+                cmd = ["ffmpeg", "-y", "-f", "concat", "-safe", "0", "-i", concat_list, "-c", "copy", xfade_out]
+                subprocess.run(cmd, capture_output=True, text=True, timeout=300)
+                os.remove(concat_list)
+            merged_path = xfade_out
+
+    print(f"Phase 2 done: transitions applied")
+
+    # ── Phase 3: Mux with audio + subtitles ──
+    audio_path = os.path.join(dest, f"{content_id}_audio.flac")
+    if not os.path.exists(audio_path):
+        audio_path = os.path.join(src, "audio", f"{content_id}_audio.flac")
+    srt_path = os.path.join(src, "srt", "subtitles.srt")
+
+    output_path = os.path.join(dest, f"{content_id}_final.mp4")
+    cmd = ["ffmpeg", "-y", "-i", merged_path]
+
+    if os.path.exists(audio_path):
+        cmd += ["-i", audio_path]
+        if os.path.exists(srt_path):
+            cmd += ["-vf", f"subtitles={srt_path}:force_style='FontSize=22,PrimaryColour=&H00FFFFFF'"]
+        cmd += ["-c:v", "libx264", "-preset", "fast", "-crf", "18",
+                "-c:a", "aac", "-b:a", "192k", "-shortest", output_path]
+    else:
+        if os.path.exists(srt_path):
+            cmd += ["-vf", f"subtitles={srt_path}:force_style='FontSize=22,PrimaryColour=&H00FFFFFF'",
+                    "-c:v", "libx264", "-preset", "fast", "-crf", "18", output_path]
+        else:
+            shutil.copy2(merged_path, output_path)
+            cmd = None
+
+    if cmd:
+        result = subprocess.run(cmd, capture_output=True, text=True, timeout=900)
+        if result.returncode != 0:
+            raise RuntimeError(f"Phase 3 mux failed: {result.stderr[:500]}")
+
+    # Cleanup segments
+    shutil.rmtree(segments_dir, ignore_errors=True)
+
+    final_size = round(os.path.getsize(output_path) / 1024 / 1024, 2)
+    print(f"Phase 3 done: {output_path} ({final_size} MB)")
+
+    return [{
+        "filename": f"{content_id}_final.mp4",
+        "path": output_path,
+        "size_mb": final_size,
+        "segments_rendered": len(segment_paths),
+        "segments_skipped": skipped,
+    }]
 
 
 def _compose_concat_audio(src, dest, content_id):
