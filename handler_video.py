@@ -265,6 +265,23 @@ def _compose_scene_manifest(src, dest, content_id, config, channel):
     ambient_dir = os.path.join(segments_dir, "_ambient")
     os.makedirs(ambient_dir, exist_ok=True)
 
+    def _find_image(img_dir, sid, frame_type):
+        """Find best image for a scene. Prefers refined (_002) over base (_001).
+        Pattern: scene_{sid}_{frame_type}_{index}_{file}.png
+        Example: scene_000_initial_000_002.png (refined)
+        """
+        # Try exact match first (legacy naming)
+        exact = os.path.join(img_dir, f"scene_{sid:03d}_{frame_type}.png")
+        if os.path.exists(exact):
+            return exact
+        # Glob for actual naming pattern, sorted → last = refined
+        candidates = sorted(glob_module.glob(
+            os.path.join(img_dir, f"scene_{sid:03d}_{frame_type}_*.png")))
+        if candidates:
+            return candidates[-1]  # Last file = most refined version
+        return None
+
+
     # ── Phase 1: Render each scene to a normalized segment ──
     segment_paths = []
     skipped = 0
@@ -304,13 +321,13 @@ def _compose_scene_manifest(src, dest, content_id, config, channel):
 
             if render_type == "crossfade":
                 # Crossfade between two images
-                img_a = os.path.join(img_dir, f"scene_{sid:03d}_initial.png")
-                img_b = os.path.join(img_dir, f"scene_{sid:03d}_final.png")
-                if not os.path.exists(img_a):
+                img_a = _find_image(img_dir, sid, "initial")
+                img_b = _find_image(img_dir, sid, "final")
+                if not img_a:
                     print(f"WARN: scene {sid} crossfade missing initial image, skipping")
                     skipped += 1
                     continue
-                if not os.path.exists(img_b):
+                if not img_b:
                     # Fallback to ken_burns if no final image
                     render_type = "ken_burns"
                 else:
@@ -338,8 +355,8 @@ def _compose_scene_manifest(src, dest, content_id, config, channel):
 
             if render_type == "ken_burns":
                 # Slow zoom on single image
-                img_path = os.path.join(img_dir, f"scene_{sid:03d}_initial.png")
-                if not os.path.exists(img_path):
+                img_path = _find_image(img_dir, sid, "initial")
+                if not img_path:
                     print(f"WARN: scene {sid} ken_burns missing image, skipping")
                     skipped += 1
                     continue
