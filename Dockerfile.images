@@ -84,7 +84,7 @@ RUN cd /comfyui \
     && echo "=== ComfyUI deps restored ==="
 
 RUN uv pip install comfy-aimdo torchsde comfyui-frontend-package comfy-kitchen blake3 simpleeval \
-    sqlalchemy alembic kornia safetensors \
+    sqlalchemy alembic kornia safetensors einops \
     && echo "=== explicit runtime deps installed ==="
 
 # ── Verify environment (build-time gate) ────────────────────
@@ -101,6 +101,7 @@ import kornia; \
 import PIL; \
 import gguf; \
 import blake3; \
+import einops; \
 print(f'torch={torch.__version__}, numpy={numpy.__version__}, safetensors={safetensors.__version__}'); \
 print('=== Images endpoint environment verified ===')"
 
