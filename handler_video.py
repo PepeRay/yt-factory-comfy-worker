@@ -1,10 +1,11 @@
 """
 YouTube Factory — Video Endpoint Handler
-Job types: img-vid, compose
+Job types: img-vid, compose, download
 Models: LTX-Video 2.3, FFmpeg
 """
 
 import json
+import base64
 import os
 import time
 import uuid
@@ -549,7 +550,7 @@ def _compose_full(src, dest, content_id, config):
 def handler(job):
     """
     Video Endpoint Handler.
-    Accepts: img-vid (LTX-Video), compose (FFmpeg assembly)
+    Accepts: img-vid (LTX-Video), compose (FFmpeg assembly), download (NV file retrieval)
     """
     job_input = job.get("input", {})
 
@@ -563,6 +564,30 @@ def handler(job):
         return {"error": "Missing required field: channel"}
     if not content_id:
         return {"error": "Missing required field: content_id"}
+
+    # Download jobs (retrieve file from NV as base64)
+    if job_type == "download":
+        platform = job_input.get("platform", "youtube")
+        filename = job_input.get("filename")
+        if not filename:
+            return {"error": "Missing required field: filename"}
+        file_path = os.path.join(
+            output_dir_for(channel, content_id, platform), filename
+        )
+        if not os.path.isfile(file_path):
+            return {"error": f"File not found: {file_path}"}
+        size_mb = round(os.path.getsize(file_path) / 1024 / 1024, 2)
+        with open(file_path, "rb") as f:
+            data_b64 = base64.b64encode(f.read()).decode("ascii")
+        return {
+            "status": "success",
+            "job_type": job_type,
+            "channel": channel,
+            "content_id": content_id,
+            "filename": filename,
+            "size_mb": size_mb,
+            "data_b64": data_b64,
+        }
 
     # Compose jobs (FFmpeg, no ComfyUI needed)
     if job_type == "compose":
