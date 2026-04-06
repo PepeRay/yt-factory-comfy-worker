@@ -464,22 +464,103 @@ def _compose_scene_manifest(src, dest, content_id, config, channel):
         audio_path = os.path.join(src, "audio", f"{content_id}_audio.flac")
     srt_path = os.path.join(src, "srt", "subtitles.srt")
 
-    # Background music: check music_mood from scenes.json, fallback to default
+
+    # ── Music assembly: multi-act tracks with crossfades + fade in/out ──
     music_path = None
-    music_mood = scenes_data.get("music_mood", "default")
     music_dir = os.path.join(PROJECTS_ROOT, channel, "music")
     if os.path.isdir(music_dir):
-        candidate = os.path.join(music_dir, f"{music_mood}.mp3")
-        if os.path.isfile(candidate):
-            music_path = candidate
-            print(f"Music: using {music_mood}.mp3")
-        else:
-            fallback = os.path.join(music_dir, "default.mp3")
-            if os.path.isfile(fallback):
-                music_path = fallback
-                print(f"Music: {music_mood}.mp3 not found, using default.mp3")
+        # Read per-act moods or fallback to single music_mood
+        music_acts = scenes_data.get("music_acts", None)
+        if music_acts is None:
+            mood = scenes_data.get("music_mood", "default")
+            music_acts = [{"from_scene": scenes[0]["scene_id"],
+                           "to_scene": scenes[-1]["scene_id"], "mood": mood}]
+
+        # Calculate cumulative scene durations
+        scene_dur_map = {}
+        cumulative = 0.0
+        for scene in scenes:
+            sid = scene["scene_id"]
+            dur = scene.get("duration_sec", 5)
+            scene_dur_map[sid] = {"start": cumulative, "dur": dur}
+            cumulative += dur
+        total_video_dur = cumulative
+
+        # Build per-act music segments
+        music_build_dir = os.path.join(segments_dir, "_music")
+        os.makedirs(music_build_dir, exist_ok=True)
+        act_segments = []
+
+        for i, act in enumerate(music_acts):
+            mood = act["mood"]
+            from_s = act["from_scene"]
+            to_s = act["to_scene"]
+
+            track = os.path.join(music_dir, f"{mood}.mp3")
+            if not os.path.isfile(track):
+                track = os.path.join(music_dir, "default.mp3")
+            if not os.path.isfile(track):
+                print(f"Music: no track for mood '{mood}', skipping act {i}")
+                continue
+
+            # Calculate act duration from scene range
+            if from_s in scene_dur_map and to_s in scene_dur_map:
+                act_start = scene_dur_map[from_s]["start"]
+                act_end = scene_dur_map[to_s]["start"] + scene_dur_map[to_s]["dur"]
+                act_dur = act_end - act_start
             else:
-                print(f"Music: no tracks found in {music_dir}, continuing without music")
+                print(f"Music: scene range {from_s}-{to_s} not found, skipping act {i}")
+                continue
+
+            # Loop track + trim to act duration
+            seg_path = os.path.join(music_build_dir, f"act_{i:02d}.aac")
+            cmd = ["ffmpeg", "-y", "-stream_loop", "-1", "-i", track,
+                   "-t", str(act_dur), "-c:a", "aac", "-b:a", "128k", seg_path]
+            result = subprocess.run(cmd, capture_output=True, text=True, timeout=60)
+            if result.returncode != 0:
+                print(f"Music: failed to build act {i}: {result.stderr[:200]}")
+                continue
+            act_segments.append({"path": seg_path, "dur": act_dur, "mood": mood})
+
+        if act_segments:
+            # Crossfade between act segments (2s transition)
+            if len(act_segments) == 1:
+                assembled = act_segments[0]["path"]
+            else:
+                current = act_segments[0]["path"]
+                for j in range(1, len(act_segments)):
+                    out = os.path.join(music_build_dir, f"xfade_{j:02d}.aac")
+                    cmd = ["ffmpeg", "-y", "-i", current, "-i", act_segments[j]["path"],
+                           "-filter_complex", "acrossfade=d=2:c1=tri:c2=tri",
+                           "-c:a", "aac", "-b:a", "128k", out]
+                    result = subprocess.run(cmd, capture_output=True, text=True, timeout=60)
+                    if result.returncode != 0:
+                        # Fallback: simple concat without crossfade
+                        clist = os.path.join(music_build_dir, f"concat_{j}.txt")
+                        with open(clist, "w") as fl:
+                            fl.write(f"file '{current}'\nfile '{act_segments[j]['path']}'\n")
+                        cmd = ["ffmpeg", "-y", "-f", "concat", "-safe", "0",
+                               "-i", clist, "-c:a", "aac", out]
+                        subprocess.run(cmd, capture_output=True, text=True, timeout=60)
+                        os.remove(clist)
+                    current = out
+                assembled = current
+
+            # Apply fade in (3s) and fade out (3s)
+            music_path = os.path.join(music_build_dir, "music_final.aac")
+            fade_out_start = max(0, total_video_dur - 3)
+            cmd = ["ffmpeg", "-y", "-i", assembled,
+                   "-af", f"afade=t=in:d=3,afade=t=out:st={fade_out_start}:d=3",
+                   "-c:a", "aac", "-b:a", "128k", music_path]
+            result = subprocess.run(cmd, capture_output=True, text=True, timeout=60)
+            if result.returncode != 0:
+                music_path = assembled
+                print(f"Music: fade failed, using without fades")
+
+            moods_used = [s["mood"] for s in act_segments]
+            print(f"Music: {len(act_segments)} acts ({' > '.join(moods_used)}), fade in/out 3s")
+        else:
+            print(f"Music: no valid acts, continuing without music")
     else:
         print(f"Music: directory {music_dir} not found, continuing without music")
 
@@ -500,7 +581,7 @@ def _compose_scene_manifest(src, dest, content_id, config, channel):
         narr_idx = input_idx
         input_idx += 1
     if has_music:
-        cmd += ["-stream_loop", "-1", "-i", music_path]
+        cmd += ["-i", music_path]
         music_idx = input_idx
         input_idx += 1
     if has_ambient:
