@@ -35,6 +35,18 @@ ACCEPTED_JOB_TYPES = {
     "img-vid": "video",
 }
 
+# Platform format specs: (gen_width, gen_height, target_width, target_height, fps)
+# gen_ dimensions = multiple of 16 for VAE, target_ = final crop
+PLATFORM_FORMATS = {
+    "youtube":   (1920, 1088, 1920, 1080, 30),
+    "shorts":    (1088, 1920, 1080, 1920, 30),
+    "tiktok":    (1088, 1920, 1080, 1920, 30),
+    "instagram": (1088, 1088, 1080, 1080, 30),
+    "facebook":  (1920, 1088, 1920, 1080, 30),
+}
+DEFAULT_FORMAT = (1920, 1088, 1920, 1080, 30)
+
+
 
 def project_dir(channel, content_id):
     return os.path.join(PROJECTS_ROOT, channel, content_id)
@@ -214,7 +226,7 @@ def run_compose(channel, content_id, platform, compose_config):
     elif compose_type == "full":
         return _compose_full(src, dest, content_id, compose_config)
     elif compose_type == "scene_manifest":
-        return _compose_scene_manifest(src, dest, content_id, compose_config, channel)
+        return _compose_scene_manifest(src, dest, content_id, compose_config, channel, platform)
     else:
         raise RuntimeError(f"Unknown compose type: {compose_type}")
 
@@ -231,7 +243,7 @@ def _get_video_duration(path):
     return float(result.stdout.strip())
 
 
-def _compose_scene_manifest(src, dest, content_id, config, channel):
+def _compose_scene_manifest(src, dest, content_id, config, channel, platform="youtube"):
     """
     Compose full video from scenes.json v2 manifest.
     Phase 1: Render each scene to a normalized segment (1920x1080, 30fps, h264)
@@ -258,7 +270,7 @@ def _compose_scene_manifest(src, dest, content_id, config, channel):
     segments_dir = os.path.join(dest, "_segments")
     os.makedirs(segments_dir, exist_ok=True)
 
-    WIDTH, HEIGHT, FPS = 1920, 1080, 30
+    _gen_w, _gen_h, WIDTH, HEIGHT, FPS = PLATFORM_FORMATS.get(platform, DEFAULT_FORMAT)
     NORM = f"-vf scale={WIDTH}:{HEIGHT}:force_original_aspect_ratio=increase,crop={WIDTH}:{HEIGHT},setsar=1 -r {FPS} -c:v libx264 -preset fast -crf 18 -pix_fmt yuv420p -an"
 
     # Directory for extracted ambient audio from LTX clips
