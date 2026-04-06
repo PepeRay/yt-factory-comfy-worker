@@ -153,7 +153,7 @@ RUN cd /comfyui \
     && echo "=== ComfyUI deps restored ==="
 
 RUN uv pip install comfy-aimdo torchsde comfyui-frontend-package comfy-kitchen blake3 simpleeval \
-    sqlalchemy alembic kornia safetensors \
+    sqlalchemy alembic kornia \
     && echo "=== explicit runtime deps installed ==="
 
 # ── Verify environment (build-time gate) ────────────────────
@@ -177,8 +177,7 @@ from packaging.version import Version; \
 assert Version(transformers.__version__) >= Version('4.51.3'), f'transformers {transformers.__version__} < 4.51.3 (VibeVoice requires >=4.51.3)'; \
 assert os.path.isdir('/comfyui/custom_nodes/ComfyUI-VideoHelperSuite'), 'VHS not installed — VHS_LoadAudio will fail'; \
 assert os.path.isfile('/comfyui/custom_nodes/ComfyUI-VideoHelperSuite/__init__.py'), 'VHS __init__.py missing'; \
-import safetensors; \
-print(f'torch={torch.__version__}, numpy={numpy.__version__}, transformers={transformers.__version__}, safetensors={safetensors.__version__}'); \
+print(f'torch={torch.__version__}, numpy={numpy.__version__}, transformers={transformers.__version__}'); \
 print('=== Audio endpoint environment verified ===')"
 
 # ── Handler ──────────────────────────────────────────────────
