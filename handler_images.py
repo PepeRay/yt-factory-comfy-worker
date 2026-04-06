@@ -164,11 +164,11 @@ def collect_and_move(prompt_id, dest_dir, prefix, index=None):
         is_last = (i == len(all_files) - 1)
         if index is not None:
             if is_last:
-                # Last output = refined version → clean name
-                dest_name = f"{prefix}_{index:03d}{item['ext']}"
+                # Last output = refined → clean name (prefix already has scene_id)
+                dest_name = f"{prefix}{item['ext']}"
             else:
-                # Earlier outputs (base/draft) → suffixed name
-                dest_name = f"{prefix}_{index:03d}_draft_{i + 1:03d}{item['ext']}"
+                # Single file or draft → include counter
+                dest_name = f"{prefix}_{i + 1:03d}{item['ext']}"
         else:
             dest_name = f"{prefix}_{i + 1:03d}{item['ext']}"
 
