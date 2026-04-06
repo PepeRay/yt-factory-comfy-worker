@@ -1,11 +1,12 @@
 """
 YouTube Factory — Audio Endpoint Handler
-Job types: txt-voice, voice-srt
+Job types: txt-voice, voice-srt, compose (concat_audio only)
 Models: VibeVoice TTS, Whisper STT
 """
 
 import json
 import os
+import subprocess
 import time
 import uuid
 import shutil
@@ -41,6 +42,11 @@ def project_dir(channel, content_id):
 
 def source_dir(channel, content_id, media_type):
     return os.path.join(project_dir(channel, content_id), "source", media_type)
+
+
+def output_dir_for(channel, content_id, platform):
+    """Return the outputs directory for a platform render."""
+    return os.path.join(project_dir(channel, content_id), "outputs", platform)
 
 
 def wait_for_comfyui():
@@ -201,10 +207,63 @@ def collect_and_move(prompt_id, dest_dir, prefix, index=None):
     return results
 
 
+# ── Compose (FFmpeg) — concat_audio only ────────────────────
+
+def _compose_concat_audio(src, dest, content_id):
+    """Concatenate all audio chunks into a single file."""
+    audio_dir = os.path.join(src, "audio")
+    if not os.path.isdir(audio_dir):
+        raise RuntimeError(f"No audio directory found: {audio_dir}")
+
+    chunks = sorted(glob_module.glob(os.path.join(audio_dir, "chunk_*")))
+    if not chunks:
+        raise RuntimeError(f"No audio chunks found in {audio_dir}")
+
+    concat_list = os.path.join(dest, "concat_list.txt")
+    with open(concat_list, "w") as f:
+        for chunk in chunks:
+            f.write(f"file '{chunk}'\n")
+
+    output_path = os.path.join(dest, f"{content_id}_audio.flac")
+    cmd = [
+        "ffmpeg", "-y", "-f", "concat", "-safe", "0",
+        "-i", concat_list, "-c:a", "flac", output_path
+    ]
+
+    result = subprocess.run(cmd, capture_output=True, text=True, timeout=300)
+    if result.returncode != 0:
+        raise RuntimeError(f"FFmpeg concat_audio failed: {result.stderr[:500]}")
+
+    os.remove(concat_list)
+    return [{"filename": f"{content_id}_audio.flac", "path": output_path,
+             "size_mb": round(os.path.getsize(output_path) / 1024 / 1024, 2)}]
+
+
+def run_compose(channel, content_id, platform, compose_config):
+    """
+    FFmpeg composition job — Audio endpoint only supports concat_audio.
+    Reads chunks from source/audio/, writes to outputs/{platform}/.
+    """
+    src = os.path.join(project_dir(channel, content_id), "source")
+    dest = output_dir_for(channel, content_id, platform)
+    os.makedirs(dest, exist_ok=True)
+
+    compose_type = compose_config.get("type", "concat_audio")
+
+    if compose_type == "concat_audio":
+        return _compose_concat_audio(src, dest, content_id)
+    else:
+        raise RuntimeError(
+            f"Audio endpoint only supports compose type 'concat_audio'. Got: {compose_type}"
+        )
+
+
+# ── Main Handler ────────────────────────────────────────────
+
 def handler(job):
     """
     Audio Endpoint Handler.
-    Accepts: txt-voice (TTS), voice-srt (Whisper STT)
+    Accepts: txt-voice (TTS), voice-srt (Whisper STT), compose (concat_audio)
     """
     job_input = job.get("input", {})
 
@@ -219,8 +278,26 @@ def handler(job):
     if not content_id:
         return {"error": "Missing required field: content_id"}
 
+    # ── Compose jobs don't need ComfyUI ──
+    if job_type == "compose":
+        platform = job_input.get("platform", "youtube")
+        compose_config = job_input.get("compose", {})
+        try:
+            results = run_compose(channel, content_id, platform, compose_config)
+            return {
+                "status": "success",
+                "job_type": job_type,
+                "channel": channel,
+                "content_id": content_id,
+                "platform": platform,
+                "outputs": results,
+            }
+        except RuntimeError as e:
+            return {"error": str(e), "job_type": job_type}
+
+    # ── ComfyUI workflow jobs ──
     if job_type not in ACCEPTED_JOB_TYPES:
-        return {"error": f"Audio endpoint only accepts: {list(ACCEPTED_JOB_TYPES.keys())}. Got: {job_type}"}
+        return {"error": f"Audio endpoint only accepts: {list(ACCEPTED_JOB_TYPES.keys()) + ['compose']}. Got: {job_type}"}
 
     workflow = job_input.get("workflow")
     if not workflow:
