@@ -161,10 +161,14 @@ def collect_and_move(prompt_id, dest_dir, prefix, index=None):
 
     results = []
     for i, item in enumerate(all_files):
-        if index is not None and len(all_files) == 1:
-            dest_name = f"{prefix}_{index:03d}{item['ext']}"
-        elif index is not None:
-            dest_name = f"{prefix}_{index:03d}_{i + 1:03d}{item['ext']}"
+        is_last = (i == len(all_files) - 1)
+        if index is not None:
+            if is_last:
+                # Last output = refined version → clean name
+                dest_name = f"{prefix}_{index:03d}{item['ext']}"
+            else:
+                # Earlier outputs (base/draft) → suffixed name
+                dest_name = f"{prefix}_{index:03d}_draft_{i + 1:03d}{item['ext']}"
         else:
             dest_name = f"{prefix}_{i + 1:03d}{item['ext']}"
 
