@@ -75,11 +75,19 @@ RUN comfy node install comfyui-ltxvideo || true && \
 WORKDIR /
 
 # ── Video-specific deps ─────────────────────────────────────
+# Includes comfyui-easy-use requirements (diffusers, accelerate, peft, lark, matplotlib)
+# comfy node install puts deps in /comfyui/.venv/ but ComfyUI runs from /opt/venv/
 RUN uv pip install \
     opencv-python \
     av \
     gguf \
     PyWavelets \
+    diffusers \
+    accelerate \
+    peft \
+    lark \
+    onnxruntime \
+    matplotlib \
     && echo "=== Video deps installed ==="
 
 # ── Restore critical packages ───────────────────────────────
@@ -119,6 +127,11 @@ import einops; \
 import transformers; \
 import spandrel; \
 import pywt; \
+import diffusers; \
+import accelerate; \
+import peft; \
+import lark; \
+import matplotlib; \
 print(f'torch={torch.__version__}, numpy={numpy.__version__}, transformers={transformers.__version__}'); \
 print('=== Video endpoint environment verified ===')"
 
