@@ -84,7 +84,7 @@ RUN cd /comfyui \
     && echo "=== ComfyUI deps restored ==="
 
 RUN uv pip install comfy-aimdo torchsde comfyui-frontend-package comfy-kitchen blake3 simpleeval \
-    sqlalchemy alembic kornia \
+    sqlalchemy alembic kornia safetensors \
     && echo "=== explicit runtime deps installed ==="
 
 # ── Verify environment (build-time gate) ────────────────────
@@ -93,6 +93,7 @@ RUN python -c "\
 import torch; \
 import torchvision; \
 import numpy; \
+import safetensors; \
 import comfy_aimdo; \
 import sqlalchemy; \
 import alembic; \
@@ -100,7 +101,7 @@ import kornia; \
 import PIL; \
 import gguf; \
 import blake3; \
-print(f'torch={torch.__version__}, numpy={numpy.__version__}'); \
+print(f'torch={torch.__version__}, numpy={numpy.__version__}, safetensors={safetensors.__version__}'); \
 print('=== Images endpoint environment verified ===')"
 
 # ── Handler ──────────────────────────────────────────────────
