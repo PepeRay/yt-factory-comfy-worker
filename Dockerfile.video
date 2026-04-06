@@ -93,7 +93,7 @@ RUN cd /comfyui \
     && echo "=== ComfyUI deps restored ==="
 
 RUN uv pip install comfy-aimdo torchsde comfyui-frontend-package comfy-kitchen blake3 simpleeval \
-    sqlalchemy alembic kornia safetensors \
+    sqlalchemy alembic kornia safetensors einops transformers tokenizers sentencepiece scipy tqdm filelock spandrel \
     && echo "=== explicit runtime deps installed ==="
 
 # ── Verify environment (build-time gate) ────────────────────
@@ -112,7 +112,10 @@ import av; \
 import PIL; \
 import gguf; \
 import blake3; \
-print(f'torch={torch.__version__}, numpy={numpy.__version__}, safetensors={safetensors.__version__}'); \
+import einops; \
+import transformers; \
+import spandrel; \
+print(f'torch={torch.__version__}, numpy={numpy.__version__}, transformers={transformers.__version__}'); \
 print('=== Video endpoint environment verified ===')"
 
 # ── Handler ──────────────────────────────────────────────────
