@@ -62,13 +62,15 @@ COPY extra_model_paths.yaml ./
 #   UnetLoaderGGUF → comfyui-gguf (WAS MISSING — FIXED)
 #   Power Lora Loader, Any Switch → rgthree-comfy (WAS MISSING — FIXED)
 #   CM_IntToFloat → comfymath
+#   easy cleanGpuUsed, easy clearCacheAll → comfyui-easy-use (VRAM cleanup mid-pipeline)
 RUN comfy node install comfyui-ltxvideo || true && \
     comfy node install comfyui-videohelpersuite || true && \
     comfy node install comfyui-kjnodes || true && \
     comfy node install comfyui-custom-scripts || true && \
     comfy node install comfyui-gguf || true && \
     comfy node install rgthree-comfy || true && \
-    comfy node install comfymath || true
+    comfy node install comfymath || true && \
+    comfy node install comfyui-easy-use || true
 
 WORKDIR /
 
@@ -77,6 +79,7 @@ RUN uv pip install \
     opencv-python \
     av \
     gguf \
+    PyWavelets \
     && echo "=== Video deps installed ==="
 
 # ── Restore critical packages ───────────────────────────────
@@ -115,6 +118,7 @@ import blake3; \
 import einops; \
 import transformers; \
 import spandrel; \
+import pywt; \
 print(f'torch={torch.__version__}, numpy={numpy.__version__}, transformers={transformers.__version__}'); \
 print('=== Video endpoint environment verified ===')"
 
