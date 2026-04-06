@@ -259,7 +259,7 @@ def _compose_scene_manifest(src, dest, content_id, config, channel):
     os.makedirs(segments_dir, exist_ok=True)
 
     WIDTH, HEIGHT, FPS = 1920, 1080, 30
-    NORM = f"-vf scale={WIDTH}:{HEIGHT}:force_original_aspect_ratio=decrease,pad={WIDTH}:{HEIGHT}:(ow-iw)/2:(oh-ih)/2,setsar=1 -r {FPS} -c:v libx264 -preset fast -crf 18 -pix_fmt yuv420p -an"
+    NORM = f"-vf scale={WIDTH}:{HEIGHT}:force_original_aspect_ratio=increase,crop={WIDTH}:{HEIGHT},setsar=1 -r {FPS} -c:v libx264 -preset fast -crf 18 -pix_fmt yuv420p -an"
 
     # Directory for extracted ambient audio from LTX clips
     ambient_dir = os.path.join(segments_dir, "_ambient")
