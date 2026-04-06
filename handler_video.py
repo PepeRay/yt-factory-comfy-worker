@@ -214,7 +214,7 @@ def run_compose(channel, content_id, platform, compose_config):
     elif compose_type == "full":
         return _compose_full(src, dest, content_id, compose_config)
     elif compose_type == "scene_manifest":
-        return _compose_scene_manifest(src, dest, content_id, compose_config)
+        return _compose_scene_manifest(src, dest, content_id, compose_config, channel)
     else:
         raise RuntimeError(f"Unknown compose type: {compose_type}")
 
@@ -231,12 +231,12 @@ def _get_video_duration(path):
     return float(result.stdout.strip())
 
 
-def _compose_scene_manifest(src, dest, content_id, config):
+def _compose_scene_manifest(src, dest, content_id, config, channel):
     """
     Compose full video from scenes.json v2 manifest.
     Phase 1: Render each scene to a normalized segment (1920x1080, 30fps, h264)
     Phase 2: Apply transitions between segments (cut, dissolve, fade_black, fade_white)
-    Phase 3: Mux with audio and optional subtitles
+    Phase 3: Mux with audio, background music, and optional subtitles
     """
     # Load scenes.json
     scenes_path = config.get("scenes_path", os.path.join(src, "..", "config", "scenes.json"))
@@ -422,30 +422,63 @@ def _compose_scene_manifest(src, dest, content_id, config):
 
     print(f"Phase 2 done: transitions applied")
 
-    # ── Phase 3: Mux with audio + subtitles ──
+    # ── Phase 3: Mux with audio + music + subtitles ──
     audio_path = os.path.join(dest, f"{content_id}_audio.flac")
     if not os.path.exists(audio_path):
         audio_path = os.path.join(src, "audio", f"{content_id}_audio.flac")
     srt_path = os.path.join(src, "srt", "subtitles.srt")
 
+    # Background music: check music_mood from scenes.json, fallback to default
+    music_path = None
+    music_mood = scenes_data.get("music_mood", "default")
+    music_dir = os.path.join(PROJECTS_ROOT, channel, "music")
+    if os.path.isdir(music_dir):
+        candidate = os.path.join(music_dir, f"{music_mood}.mp3")
+        if os.path.isfile(candidate):
+            music_path = candidate
+            print(f"Music: using {music_mood}.mp3")
+        else:
+            fallback = os.path.join(music_dir, "default.mp3")
+            if os.path.isfile(fallback):
+                music_path = fallback
+                print(f"Music: {music_mood}.mp3 not found, using default.mp3")
+            else:
+                print(f"Music: no tracks found in {music_dir}, continuing without music")
+    else:
+        print(f"Music: directory {music_dir} not found, continuing without music")
+
     output_path = os.path.join(dest, f"{content_id}_final.mp4")
+    has_audio = os.path.exists(audio_path)
+    has_music = music_path is not None
+    has_srt = os.path.exists(srt_path)
+
     cmd = ["ffmpeg", "-y", "-i", merged_path]
 
-    if os.path.exists(audio_path):
-        cmd += ["-i", audio_path]
-        if os.path.exists(srt_path):
+    if has_audio and has_music:
+        # Narration + background music mixed
+        cmd += ["-i", audio_path, "-stream_loop", "-1", "-i", music_path]
+        filter_parts = ["[2:a]volume=0.12[m]", "[1:a][m]amix=inputs=2:duration=first[aout]"]
+        cmd += ["-filter_complex", ";".join(filter_parts), "-map", "0:v", "-map", "[aout]"]
+        if has_srt:
             cmd += ["-vf", f"subtitles={srt_path}:force_style='FontSize=22,PrimaryColour=&H00FFFFFF'"]
         cmd += ["-c:v", "libx264", "-preset", "fast", "-crf", "18",
                 "-c:a", "aac", "-b:a", "192k", "-shortest", output_path]
+    elif has_audio:
+        # Narration only, no music
+        cmd += ["-i", audio_path]
+        if has_srt:
+            cmd += ["-vf", f"subtitles={srt_path}:force_style='FontSize=22,PrimaryColour=&H00FFFFFF'"]
+        cmd += ["-c:v", "libx264", "-preset", "fast", "-crf", "18",
+                "-c:a", "aac", "-b:a", "192k", "-shortest", output_path]
+    elif has_srt:
+        cmd += ["-vf", f"subtitles={srt_path}:force_style='FontSize=22,PrimaryColour=&H00FFFFFF'",
+                "-c:v", "libx264", "-preset", "fast", "-crf", "18", output_path]
     else:
-        if os.path.exists(srt_path):
-            cmd += ["-vf", f"subtitles={srt_path}:force_style='FontSize=22,PrimaryColour=&H00FFFFFF'",
-                    "-c:v", "libx264", "-preset", "fast", "-crf", "18", output_path]
-        else:
-            shutil.copy2(merged_path, output_path)
-            cmd = None
+        shutil.copy2(merged_path, output_path)
+        cmd = None
 
     if cmd:
+        print(f"Phase 3 cmd: {' '.join(cmd[:10])}...")
         result = subprocess.run(cmd, capture_output=True, text=True, timeout=900)
         if result.returncode != 0:
             raise RuntimeError(f"Phase 3 mux failed: {result.stderr[:500]}")
