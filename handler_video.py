@@ -261,6 +261,10 @@ def _compose_scene_manifest(src, dest, content_id, config, channel):
     WIDTH, HEIGHT, FPS = 1920, 1080, 30
     NORM = f"-vf scale={WIDTH}:{HEIGHT}:force_original_aspect_ratio=decrease,pad={WIDTH}:{HEIGHT}:(ow-iw)/2:(oh-ih)/2,setsar=1 -r {FPS} -c:v libx264 -preset fast -crf 18 -pix_fmt yuv420p -an"
 
+    # Directory for extracted ambient audio from LTX clips
+    ambient_dir = os.path.join(segments_dir, "_ambient")
+    os.makedirs(ambient_dir, exist_ok=True)
+
     # ── Phase 1: Render each scene to a normalized segment ──
     segment_paths = []
     skipped = 0
@@ -270,6 +274,7 @@ def _compose_scene_manifest(src, dest, content_id, config, channel):
         render_type = scene.get("render_type", "ken_burns")
         duration = scene.get("duration_sec", 5)
         seg_path = os.path.join(segments_dir, f"seg_{sid:04d}.mp4")
+        amb_path = os.path.join(ambient_dir, f"amb_{sid:04d}.aac")
 
         try:
             if render_type == "video_clip":
@@ -287,6 +292,13 @@ def _compose_scene_manifest(src, dest, content_id, config, channel):
                     result = subprocess.run(cmd.split(), capture_output=True, text=True, timeout=120)
                     if result.returncode != 0:
                         raise RuntimeError(f"segment {sid} video_clip: {result.stderr[:200]}")
+                    # Extract ambient audio from LTX clip (best effort)
+                    ext_cmd = ["ffmpeg", "-y", "-i", clip_path, "-vn", "-c:a", "aac", "-b:a", "128k", amb_path]
+                    ext_result = subprocess.run(ext_cmd, capture_output=True, text=True, timeout=30)
+                    if ext_result.returncode != 0:
+                        # No audio in clip — generate silence
+                        sil_cmd = ["ffmpeg", "-y", "-f", "lavfi", "-i", f"anullsrc=r=44100:cl=stereo", "-t", str(duration), "-c:a", "aac", amb_path]
+                        subprocess.run(sil_cmd, capture_output=True, text=True, timeout=30)
                     segment_paths.append({"path": seg_path, "scene": scene})
                     continue
 
@@ -318,6 +330,9 @@ def _compose_scene_manifest(src, dest, content_id, config, channel):
                     result = subprocess.run(cmd, capture_output=True, text=True, timeout=120)
                     if result.returncode != 0:
                         raise RuntimeError(f"segment {sid} crossfade: {result.stderr[:200]}")
+                    # Generate silence for non-video scenes
+                    sil_cmd = ["ffmpeg", "-y", "-f", "lavfi", "-i", f"anullsrc=r=44100:cl=stereo", "-t", str(duration), "-c:a", "aac", amb_path]
+                    subprocess.run(sil_cmd, capture_output=True, text=True, timeout=30)
                     segment_paths.append({"path": seg_path, "scene": scene})
                     continue
 
@@ -344,6 +359,9 @@ def _compose_scene_manifest(src, dest, content_id, config, channel):
                 result = subprocess.run(cmd, capture_output=True, text=True, timeout=120)
                 if result.returncode != 0:
                     raise RuntimeError(f"segment {sid} ken_burns: {result.stderr[:200]}")
+                # Generate silence for non-video scenes
+                sil_cmd = ["ffmpeg", "-y", "-f", "lavfi", "-i", f"anullsrc=r=44100:cl=stereo", "-t", str(duration), "-c:a", "aac", amb_path]
+                subprocess.run(sil_cmd, capture_output=True, text=True, timeout=30)
                 segment_paths.append({"path": seg_path, "scene": scene})
 
         except Exception as e:
@@ -355,6 +373,24 @@ def _compose_scene_manifest(src, dest, content_id, config, channel):
 
     print(f"Phase 1 done: {len(segment_paths)} segments, {skipped} skipped")
 
+    # Concatenate ambient audio track from all segments
+    ambient_files = sorted(glob_module.glob(os.path.join(ambient_dir, "amb_*.aac")))
+    ambient_concat_path = os.path.join(segments_dir, "ambient_full.aac")
+    if ambient_files:
+        amb_list = os.path.join(segments_dir, "ambient_list.txt")
+        with open(amb_list, "w") as f:
+            for af in ambient_files:
+                f.write(f"file '{af}'\n")
+        cmd = ["ffmpeg", "-y", "-f", "concat", "-safe", "0", "-i", amb_list, "-c:a", "aac", ambient_concat_path]
+        result = subprocess.run(cmd, capture_output=True, text=True, timeout=120)
+        if result.returncode != 0:
+            print(f"WARN: ambient concat failed, continuing without ambient audio")
+            ambient_concat_path = None
+        else:
+            print(f"Ambient audio: {len(ambient_files)} segments concatenated")
+        os.remove(amb_list)
+    else:
+        ambient_concat_path = None
     # ── Phase 2: Apply transitions ──
     merged_path = segment_paths[0]["path"]
 
@@ -422,7 +458,7 @@ def _compose_scene_manifest(src, dest, content_id, config, channel):
 
     print(f"Phase 2 done: transitions applied")
 
-    # ── Phase 3: Mux with audio + music + subtitles ──
+    # ── Phase 3: Mux with narration + music + ambient + subtitles ──
     audio_path = os.path.join(dest, f"{content_id}_audio.flac")
     if not os.path.exists(audio_path):
         audio_path = os.path.join(src, "audio", f"{content_id}_audio.flac")
@@ -448,37 +484,76 @@ def _compose_scene_manifest(src, dest, content_id, config, channel):
         print(f"Music: directory {music_dir} not found, continuing without music")
 
     output_path = os.path.join(dest, f"{content_id}_final.mp4")
-    has_audio = os.path.exists(audio_path)
+    has_narration = os.path.exists(audio_path)
     has_music = music_path is not None
+    has_ambient = ambient_concat_path is not None and os.path.isfile(ambient_concat_path)
     has_srt = os.path.exists(srt_path)
 
+    # Build FFmpeg command with dynamic audio mixing
+    # Input indices: 0=video, then narration/music/ambient in order
     cmd = ["ffmpeg", "-y", "-i", merged_path]
+    input_idx = 1
+    narr_idx = music_idx = amb_idx = None
 
-    if has_audio and has_music:
-        # Narration + background music mixed
-        cmd += ["-i", audio_path, "-stream_loop", "-1", "-i", music_path]
-        filter_parts = ["[2:a]volume=0.12[m]", "[1:a][m]amix=inputs=2:duration=first[aout]"]
-        cmd += ["-filter_complex", ";".join(filter_parts), "-map", "0:v", "-map", "[aout]"]
-        if has_srt:
-            cmd += ["-vf", f"subtitles={srt_path}:force_style='FontSize=22,PrimaryColour=&H00FFFFFF'"]
-        cmd += ["-c:v", "libx264", "-preset", "fast", "-crf", "18",
-                "-c:a", "aac", "-b:a", "192k", "-shortest", output_path]
-    elif has_audio:
-        # Narration only, no music
+    if has_narration:
         cmd += ["-i", audio_path]
-        if has_srt:
-            cmd += ["-vf", f"subtitles={srt_path}:force_style='FontSize=22,PrimaryColour=&H00FFFFFF'"]
+        narr_idx = input_idx
+        input_idx += 1
+    if has_music:
+        cmd += ["-stream_loop", "-1", "-i", music_path]
+        music_idx = input_idx
+        input_idx += 1
+    if has_ambient:
+        cmd += ["-i", ambient_concat_path]
+        amb_idx = input_idx
+        input_idx += 1
+
+    # Build audio filter chain
+    audio_inputs = []
+    filter_parts = []
+    if narr_idx is not None:
+        filter_parts.append(f"[{narr_idx}:a]volume=1.0[narr]")
+        audio_inputs.append("[narr]")
+    if music_idx is not None:
+        filter_parts.append(f"[{music_idx}:a]volume=0.12[music]")
+        audio_inputs.append("[music]")
+    if amb_idx is not None:
+        filter_parts.append(f"[{amb_idx}:a]volume=0.08[amb]")
+        audio_inputs.append("[amb]")
+
+    srt_filter = f"subtitles={srt_path}:force_style='FontSize=22,PrimaryColour=&H00FFFFFF'" if has_srt else None
+
+    if audio_inputs:
+        if len(audio_inputs) > 1:
+            mix_filter = "".join(audio_inputs) + f"amix=inputs={len(audio_inputs)}:duration=first[aout]"
+            filter_parts.append(mix_filter)
+            # When using filter_complex, subtitles must be inside it (can't mix -vf and -filter_complex)
+            if srt_filter:
+                filter_parts.insert(0, f"[0:v]{srt_filter}[vout]")
+                cmd += ["-filter_complex", ";".join(filter_parts), "-map", "[vout]", "-map", "[aout]"]
+            else:
+                cmd += ["-filter_complex", ";".join(filter_parts), "-map", "0:v", "-map", "[aout]"]
+        else:
+            # Single audio source, no mixing needed
+            src_idx = narr_idx or music_idx or amb_idx
+            cmd += ["-map", "0:v", "-map", f"{src_idx}:a"]
+            if srt_filter:
+                cmd += ["-vf", srt_filter]
         cmd += ["-c:v", "libx264", "-preset", "fast", "-crf", "18",
                 "-c:a", "aac", "-b:a", "192k", "-shortest", output_path]
     elif has_srt:
-        cmd += ["-vf", f"subtitles={srt_path}:force_style='FontSize=22,PrimaryColour=&H00FFFFFF'",
+        cmd += ["-vf", srt_filter,
                 "-c:v", "libx264", "-preset", "fast", "-crf", "18", output_path]
     else:
         shutil.copy2(merged_path, output_path)
         cmd = None
 
     if cmd:
-        print(f"Phase 3 cmd: {' '.join(cmd[:10])}...")
+        layers = []
+        if has_narration: layers.append("narration")
+        if has_music: layers.append(f"music({music_mood})")
+        if has_ambient: layers.append("ambient")
+        print(f"Phase 3: mixing {' + '.join(layers) if layers else 'video only'}")
         result = subprocess.run(cmd, capture_output=True, text=True, timeout=900)
         if result.returncode != 0:
             raise RuntimeError(f"Phase 3 mux failed: {result.stderr[:500]}")
