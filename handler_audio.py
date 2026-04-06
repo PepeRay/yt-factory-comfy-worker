@@ -148,6 +148,21 @@ def find_output_file(filename, subfolder=""):
     return None
 
 
+
+def free_vram():
+    """Call ComfyUI /free endpoint to unload models and release VRAM between jobs."""
+    try:
+        data = json.dumps({"unload_models": True, "free_memory": True}).encode("utf-8")
+        req = urllib.request.Request(
+            f"http://{COMFY_HOST}/free",
+            data=data,
+            headers={"Content-Type": "application/json"},
+        )
+        urllib.request.urlopen(req, timeout=30)
+    except Exception as e:
+        # Log but do not fail the job — VRAM cleanup is best-effort
+        print(f"[WARN] free_vram failed: {e}")
+
 def collect_and_move(prompt_id, dest_dir, prefix, index=None):
     history = get_history(prompt_id)
     prompt_history = history.get(prompt_id, {})
@@ -337,6 +352,9 @@ def handler(job):
         ws.close()
 
     results = collect_and_move(prompt_id, dest, prefix, index=index)
+
+    # Release VRAM so next job starts with clean GPU memory
+    free_vram()
 
     return {
         "status": "success",
