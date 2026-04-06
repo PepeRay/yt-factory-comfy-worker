@@ -662,7 +662,7 @@ def _compose_scene_manifest(src, dest, content_id, config, channel, platform="yo
     if cmd:
         layers = []
         if has_narration: layers.append("narration")
-        if has_music: layers.append(f"music({music_mood})")
+        if has_music: layers.append("music")
         if has_ambient: layers.append("ambient")
         print(f"Phase 3: mixing {' + '.join(layers) if layers else 'video only'}")
         result = subprocess.run(cmd, capture_output=True, text=True, timeout=900)
