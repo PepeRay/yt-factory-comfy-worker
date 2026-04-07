@@ -880,6 +880,8 @@ def handler(job):
 
     results = collect_and_move(prompt_id, dest, prefix, index=index)
 
+    free_vram()
+
     return {
         "status": "success",
         "job_type": job_type,
