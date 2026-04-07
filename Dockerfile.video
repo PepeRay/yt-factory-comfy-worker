@@ -152,8 +152,9 @@ RUN test -d /comfyui/custom_nodes/Comfyui_TTP_Toolset && \
     echo "=== TTP Toolset custom node verified ==="
 
 # ── Handler ──────────────────────────────────────────────────
-RUN uv pip install runpod requests websocket-client
+RUN uv pip install runpod requests websocket-client boto3
 
+COPY r2_helper.py /r2_helper.py
 COPY handler_video.py /handler.py
 COPY start_video.sh /start.sh
 RUN chmod +x /start.sh

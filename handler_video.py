@@ -18,6 +18,19 @@ import glob as glob_module
 import runpod
 import websocket
 
+# R2 storage (Cloudflare) — enabled when env vars are set
+try:
+    import r2_helper
+    R2_ENABLED = bool(
+        os.environ.get("R2_ENDPOINT")
+        and os.environ.get("R2_ACCESS_KEY_ID")
+        and os.environ.get("R2_SECRET_ACCESS_KEY")
+    )
+    if R2_ENABLED:
+        print("[INFO] R2 storage enabled — dual-write mode (NV + R2)")
+except ImportError:
+    R2_ENABLED = False
+
 COMFY_HOST = "127.0.0.1:8188"
 COMFY_API_AVAILABLE_INTERVAL_MS = int(os.environ.get("COMFY_API_AVAILABLE_INTERVAL_MS", 500))
 COMFY_API_AVAILABLE_MAX_RETRIES = int(os.environ.get("COMFY_API_AVAILABLE_MAX_RETRIES", 240))
@@ -257,6 +270,46 @@ def _get_video_duration(path):
     return float(result.stdout.strip())
 
 
+def _ensure_compose_inputs(channel, content_id, src, dest):
+    """Download compose inputs from R2 if not available locally (NV or disk).
+    Phase 1: NV has everything (dual-write). Phase 3: NV gone, R2 is source of truth."""
+    if not R2_ENABLED:
+        return
+    for subdir in ("images", "video", "audio", "srt"):
+        local_dir = os.path.join(src, subdir)
+        if os.path.isdir(local_dir) and os.listdir(local_dir):
+            continue
+        r2_prefix = f"{channel}/{content_id}/source/{subdir}/"
+        try:
+            keys = r2_helper.list_files(r2_prefix)
+            if keys:
+                os.makedirs(local_dir, exist_ok=True)
+                for key in keys:
+                    local_path = os.path.join(local_dir, os.path.basename(key))
+                    r2_helper.download_file(key, local_path)
+                print(f"[INFO] Downloaded {len(keys)} files from R2 → {subdir}/")
+        except Exception as e:
+            print(f"[WARN] R2 download failed for {subdir}: {e}")
+
+    # Also check for concat audio in outputs dir
+    audio_in_dest = os.path.join(dest, f"{content_id}_audio.flac")
+    audio_in_src = os.path.join(src, "audio", f"{content_id}_audio.flac")
+    if not os.path.exists(audio_in_dest) and not os.path.exists(audio_in_src):
+        # Try R2 output path (from Audio endpoint compose)
+        for r2_key in [
+            f"{channel}/{content_id}/output/youtube/{content_id}_audio.flac",
+            f"{channel}/{content_id}/output/{content_id}_audio.flac",
+        ]:
+            try:
+                if r2_helper.file_exists(r2_key):
+                    os.makedirs(os.path.dirname(audio_in_src), exist_ok=True)
+                    r2_helper.download_file(r2_key, audio_in_src)
+                    print(f"[INFO] Downloaded concat audio from R2: {r2_key}")
+                    break
+            except Exception as e:
+                print(f"[WARN] R2 concat audio download failed: {e}")
+
+
 def _compose_scene_manifest(src, dest, content_id, config, channel, platform="youtube"):
     """
     Compose full video from scenes.json v2 manifest.
@@ -264,6 +317,9 @@ def _compose_scene_manifest(src, dest, content_id, config, channel, platform="yo
     Phase 2: Apply transitions between segments (cut, dissolve, fade_black, fade_white)
     Phase 3: Mux with audio, background music, and optional subtitles
     """
+    # Ensure all inputs are available locally (downloads from R2 if NV missing)
+    _ensure_compose_inputs(channel, content_id, src, dest)
+
     # Load scenes - prefer inline from payload, fallback to NV file
     if config.get("scenes"):
         scenes = config["scenes"]
@@ -643,7 +699,7 @@ def _compose_scene_manifest(src, dest, content_id, config, channel, platform="yo
         filter_parts.append(f"[{music_idx}:a]volume=0.12[music]")
         audio_inputs.append("[music]")
     if amb_idx is not None:
-        # Ambient disabled � LTX AudioVAE generates music, not just SFX
+        # Ambient disabled � LTX AudioVAE generates music, not just SFX
         # filter_parts.append(f"[{amb_idx}:a]volume=0.08[amb]")
         has_ambient = False
         audio_inputs.append("[amb]")
@@ -691,13 +747,26 @@ def _compose_scene_manifest(src, dest, content_id, config, channel, platform="yo
     final_size = round(os.path.getsize(output_path) / 1024 / 1024, 2)
     print(f"Phase 3 done: {output_path} ({final_size} MB)")
 
-    return [{
+    result_entry = {
         "filename": f"{content_id}_final.mp4",
         "path": output_path,
         "size_mb": final_size,
         "segments_rendered": len(segment_paths),
         "segments_skipped": skipped,
-    }]
+    }
+
+    # Upload final video to R2
+    if R2_ENABLED:
+        r2_key = f"{channel}/{content_id}/output/{platform}/{content_id}_final.mp4"
+        try:
+            r2_helper.upload_file(output_path, r2_key)
+            result_entry["r2_key"] = r2_key
+            result_entry["r2_url"] = r2_helper.presigned_url(r2_key)
+            print(f"[INFO] Final video uploaded to R2: {r2_key}")
+        except Exception as e:
+            print(f"[WARN] R2 upload failed for final video: {e}")
+
+    return [result_entry]
 
 
 def _compose_concat_audio(src, dest, content_id):
@@ -894,6 +963,20 @@ def handler(job):
         ws.close()
 
     results = collect_and_move(prompt_id, dest, prefix, index=index)
+
+    # Upload to R2 (dual-write: NV + R2 during migration)
+    if R2_ENABLED:
+        r2_prefix = f"{channel}/{content_id}/source/{media_type}"
+        for result in results:
+            filepath = result.get("path")
+            if filepath and os.path.exists(filepath):
+                r2_key = f"{r2_prefix}/{result['filename']}"
+                try:
+                    r2_helper.upload_file(filepath, r2_key)
+                    result["r2_key"] = r2_key
+                    result["r2_url"] = r2_helper.presigned_url(r2_key)
+                except Exception as e:
+                    print(f"[WARN] R2 upload failed for {result['filename']}: {e}")
 
     free_vram()
 
