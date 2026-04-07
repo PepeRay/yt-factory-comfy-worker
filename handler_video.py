@@ -286,7 +286,7 @@ def _compose_scene_manifest(src, dest, content_id, config, channel, platform="yo
     os.makedirs(segments_dir, exist_ok=True)
 
     _gen_w, _gen_h, WIDTH, HEIGHT, FPS = PLATFORM_FORMATS.get(platform, DEFAULT_FORMAT)
-    NORM = f"-vf scale={WIDTH}:{HEIGHT}:force_original_aspect_ratio=increase,crop={WIDTH}:{HEIGHT},setsar=1 -r {FPS} -c:v libx264 -preset fast -crf 18 -pix_fmt yuv420p -an"
+    NORM = f"-vf scale={WIDTH}:{HEIGHT}:force_original_aspect_ratio=increase,crop={WIDTH}:{HEIGHT},setsar=1 -r {FPS} -c:v libx264 -preset fast -crf 26 -pix_fmt yuv420p -an"
 
     # Directory for extracted ambient audio from LTX clips
     ambient_dir = os.path.join(segments_dir, "_ambient")
@@ -643,7 +643,9 @@ def _compose_scene_manifest(src, dest, content_id, config, channel, platform="yo
         filter_parts.append(f"[{music_idx}:a]volume=0.12[music]")
         audio_inputs.append("[music]")
     if amb_idx is not None:
-        filter_parts.append(f"[{amb_idx}:a]volume=0.08[amb]")
+        # Ambient disabled — LTX AudioVAE generates music, not just SFX
+        # filter_parts.append(f"[{amb_idx}:a]volume=0.08[amb]")
+        has_ambient = False
         audio_inputs.append("[amb]")
 
     srt_filter = f"subtitles={srt_path}:force_style='FontSize=22,PrimaryColour=&H00FFFFFF'" if has_srt else None
