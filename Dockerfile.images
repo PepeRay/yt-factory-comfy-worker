@@ -25,6 +25,7 @@ RUN apt-get update && apt-get install -y \
     libgl1 \
     libglib2.0-0 \
     ffmpeg \
+    imagemagick \
     && ln -sf /usr/bin/python3.12 /usr/bin/python \
     && ln -sf /usr/bin/pip3 /usr/bin/pip \
     && apt-get autoremove -y && apt-get clean -y && rm -rf /var/lib/apt/lists/*
@@ -63,6 +64,13 @@ RUN comfy node install comfyui-gguf || true && \
     comfy node install rgthree-comfy || true
 
 WORKDIR /
+
+# ── Fonts for thumbnail text overlay ─────────────────────────
+RUN mkdir -p /usr/local/share/fonts/bebas-neue \
+    && wget -q "https://github.com/google/fonts/raw/main/ofl/bebasneue/BebasNeue-Regular.ttf" \
+       -O /usr/local/share/fonts/bebas-neue/BebasNeue-Regular.ttf \
+    && fc-cache -f \
+    && echo "=== Bebas Neue font installed ==="
 
 # ── Image-specific deps ─────────────────────────────────────
 RUN uv pip install \

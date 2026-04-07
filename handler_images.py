@@ -13,6 +13,8 @@ import urllib.request
 import urllib.error
 import glob as glob_module
 
+import subprocess
+import base64
 import runpod
 import websocket
 
@@ -186,6 +188,71 @@ def collect_and_move(prompt_id, dest_dir, prefix, index=None):
     return results
 
 
+FONT_DIR = "/usr/local/share/fonts/bebas-neue"
+DEFAULT_FONT = os.path.join(FONT_DIR, "BebasNeue-Regular.ttf")
+
+
+def apply_text_overlay(image_path, overlay_text, output_path, config=None):
+    """
+    Apply text overlay using ImageMagick.
+    Resizes to 1280x720 and adds text with outline + drop shadow.
+    Only runs if overlay_text is provided — otherwise returns None.
+    """
+    if not overlay_text or not overlay_text.strip():
+        return None
+
+    cfg = config or {}
+    font = DEFAULT_FONT
+    color = cfg.get("thumb_color", "#FFFFFF")
+    outline_color = cfg.get("thumb_outline", "#000000")
+    pointsize = cfg.get("thumb_pointsize", "80")
+    stroke_width = cfg.get("thumb_stroke_width", "5")
+
+    # ImageMagick command:
+    # 1. Resize source to 1280x720
+    # 2. Create text layer with outline + shadow
+    # 3. Composite text onto image
+    cmd = [
+        "convert", image_path,
+        "-resize", "1280x720!",
+        # Create text with stroke (outline) and shadow
+        "(", "+clone",
+        "-size", "1280x720", "xc:none",
+        "-font", font,
+        "-pointsize", str(pointsize),
+        "-gravity", "center",
+        # Draw outline (stroke)
+        "-stroke", outline_color,
+        "-strokewidth", str(stroke_width),
+        "-annotate", "+0+200", overlay_text,
+        # Draw fill on top
+        "-stroke", "none",
+        "-fill", color,
+        "-annotate", "+0+200", overlay_text,
+        ")",
+        "-gravity", "center",
+        "-composite",
+        # Add drop shadow via a shadow layer
+        output_path,
+    ]
+
+    try:
+        result = subprocess.run(cmd, capture_output=True, text=True, timeout=30)
+        if result.returncode != 0:
+            print(f"[WARN] ImageMagick failed: {result.stderr[:300]}")
+            return None
+        return output_path
+    except Exception as e:
+        print(f"[WARN] Text overlay error: {e}")
+        return None
+
+
+def image_to_base64(image_path):
+    """Read image file and return base64 string."""
+    with open(image_path, "rb") as f:
+        return base64.b64encode(f.read()).decode("utf-8")
+
+
 def handler(job):
     """
     Images Endpoint Handler.
@@ -245,6 +312,34 @@ def handler(job):
 
     results = collect_and_move(prompt_id, dest, prefix, index=index)
 
+    # ── Thumbnail text overlay (only if overlay_text provided) ──
+    overlay_text = job_input.get("overlay_text")
+    thumbnail_b64 = None
+    overlay_applied = False
+
+    if overlay_text and results:
+        # Use the last (refined/detailed) image as base
+        base_image = results[-1]["path"]
+        thumb_output = os.path.join(dest, f"{prefix}_final.png")
+
+        overlay_config = {
+            "thumb_color": job_input.get("thumb_color", "#FFFFFF"),
+            "thumb_outline": job_input.get("thumb_outline", "#000000"),
+            "thumb_pointsize": job_input.get("thumb_pointsize", "80"),
+            "thumb_stroke_width": job_input.get("thumb_stroke_width", "5"),
+        }
+
+        result_path = apply_text_overlay(base_image, overlay_text, thumb_output, overlay_config)
+        if result_path and os.path.exists(result_path):
+            overlay_applied = True
+            thumbnail_b64 = image_to_base64(result_path)
+            results.append({
+                "filename": f"{prefix}_final.png",
+                "path": result_path,
+                "node_id": "text_overlay",
+                "size_mb": round(os.path.getsize(result_path) / 1024 / 1024, 2),
+            })
+
     return {
         "status": "success",
         "job_type": job_type,
@@ -252,6 +347,8 @@ def handler(job):
         "content_id": content_id,
         "output_dir": dest,
         "outputs": results,
+        "overlay_applied": overlay_applied,
+        "thumbnail_b64": thumbnail_b64,
     }
 
 
