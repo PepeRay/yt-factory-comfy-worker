@@ -207,6 +207,31 @@ FONT_DIR = "/usr/local/share/fonts/bebas-neue"
 DEFAULT_FONT = os.path.join(FONT_DIR, "BebasNeue-Regular.ttf")
 
 
+def post_process_thumbnail(image_path, output_path):
+    """
+    Apply post-processing to AI-generated thumbnail before text overlay.
+    Saturation +30%, contrast +12, sharpening, levels adjustment.
+    Research: AI models generate flat colors — this step is non-negotiable.
+    """
+    cmd = [
+        "convert", image_path,
+        "-modulate", "105,130,100",       # brightness 105%, saturation +30%, hue unchanged
+        "-brightness-contrast", "5x12",   # slight brightness boost + contrast +12
+        "-unsharp", "0x1+0.8+0.05",       # sharpening (radius 0, sigma 1, amount 0.8, threshold 0.05)
+        "-level", "5%,95%,1.05",          # crush blacks/whites slightly, mild gamma boost
+        output_path,
+    ]
+    try:
+        result = subprocess.run(cmd, capture_output=True, text=True, timeout=30)
+        if result.returncode != 0:
+            print(f"[WARN] Post-process failed: {result.stderr[:300]}")
+            return None
+        return output_path
+    except Exception as e:
+        print(f"[WARN] Post-process error: {e}")
+        return None
+
+
 def apply_text_overlay(image_path, overlay_text, output_path, config=None):
     """
     Apply text overlay using ImageMagick.
@@ -220,8 +245,8 @@ def apply_text_overlay(image_path, overlay_text, output_path, config=None):
     font = DEFAULT_FONT
     color = cfg.get("thumb_color", "#FFFFFF")
     outline_color = cfg.get("thumb_outline", "#000000")
-    pointsize = cfg.get("thumb_pointsize", "90")
-    stroke_width = cfg.get("thumb_stroke_width", "6")
+    pointsize = cfg.get("thumb_pointsize", "96")
+    stroke_width = cfg.get("thumb_stroke_width", "5")
 
     # ImageMagick: resize → shadow layer → outlined text → fill text
     # gravity North + offset +0+80 = upper ~25% of frame
@@ -229,7 +254,11 @@ def apply_text_overlay(image_path, overlay_text, output_path, config=None):
     cmd = [
         "convert", image_path,
         "-resize", "1280x720!",
-        # Blurred shadow behind text for depth
+        # Semi-transparent dark gradient behind text for "oasis of contrast"
+        "(", "-size", "1280x200", "gradient:rgba(0,0,0,0.7)-rgba(0,0,0,0)",
+        ")",
+        "-gravity", "North", "-composite",
+        # Blurred shadow behind text for depth (80% opacity, 3px blur, +5+5 offset)
         "(", "-clone", "0",
         "-fill", "none",
         "-font", font,
@@ -237,8 +266,8 @@ def apply_text_overlay(image_path, overlay_text, output_path, config=None):
         "-gravity", "North",
         "-stroke", "black",
         "-strokewidth", "8",
-        "-annotate", "+0+85", overlay_text,
-        "-blur", "0x4",
+        "-annotate", "+5+85", overlay_text,
+        "-blur", "0x3",
         ")",
         "-composite",
         # Crisp text with outline
@@ -331,7 +360,7 @@ def handler(job):
 
     results = collect_and_move(prompt_id, dest, prefix, index=index)
 
-    # ── Thumbnail text overlay (only if overlay_text provided) ──
+    # ── Thumbnail post-processing + text overlay (only if overlay_text provided) ──
     overlay_text = job_input.get("overlay_text")
     thumbnail_b64 = None
     overlay_applied = False
@@ -339,6 +368,14 @@ def handler(job):
     if overlay_text and results:
         # Use the last (refined/detailed) image as base
         base_image = results[-1]["path"]
+
+        # Post-process: saturation +30%, contrast, sharpening, levels
+        pp_output = os.path.join(dest, f"{prefix}_pp.png")
+        pp_result = post_process_thumbnail(base_image, pp_output)
+        if pp_result and os.path.exists(pp_result):
+            base_image = pp_result  # Use post-processed image for text overlay
+            print(f"[INFO] Post-processing applied: {pp_output}")
+
         thumb_output = os.path.join(dest, f"{prefix}_final.png")
 
         overlay_config = {
