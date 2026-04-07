@@ -35,6 +35,19 @@ ACCEPTED_JOB_TYPES = {
     "img-vid": "video",
 }
 
+def free_vram():
+    """Call ComfyUI /free endpoint to unload models and release VRAM/RAM between jobs."""
+    try:
+        data = json.dumps({"unload_models": True, "free_memory": True}).encode("utf-8")
+        req = urllib.request.Request(
+            f"http://{COMFY_HOST}/free",
+            data=data,
+            headers={"Content-Type": "application/json"},
+        )
+        urllib.request.urlopen(req, timeout=30)
+    except Exception as e:
+        print(f"[WARN] free_vram failed: {e}")
+
 # Platform format specs: (gen_width, gen_height, target_width, target_height, fps)
 # gen_ dimensions = multiple of 16 for VAE, target_ = final crop
 PLATFORM_FORMATS = {
