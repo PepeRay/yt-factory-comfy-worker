@@ -210,7 +210,7 @@ DEFAULT_FONT = os.path.join(FONT_DIR, "BebasNeue-Regular.ttf")
 def apply_text_overlay(image_path, overlay_text, output_path, config=None):
     """
     Apply text overlay using ImageMagick.
-    Resizes to 1280x720 and adds text with outline + drop shadow.
+    Resizes to 1280x720 and adds text in upper-third with outline + drop shadow.
     Only runs if overlay_text is provided — otherwise returns None.
     """
     if not overlay_text or not overlay_text.strip():
@@ -220,34 +220,38 @@ def apply_text_overlay(image_path, overlay_text, output_path, config=None):
     font = DEFAULT_FONT
     color = cfg.get("thumb_color", "#FFFFFF")
     outline_color = cfg.get("thumb_outline", "#000000")
-    pointsize = cfg.get("thumb_pointsize", "80")
-    stroke_width = cfg.get("thumb_stroke_width", "5")
+    pointsize = cfg.get("thumb_pointsize", "90")
+    stroke_width = cfg.get("thumb_stroke_width", "6")
 
-    # ImageMagick command:
-    # 1. Resize source to 1280x720
-    # 2. Create text layer with outline + shadow
-    # 3. Composite text onto image
+    # ImageMagick: resize → shadow layer → outlined text → fill text
+    # gravity North + offset +0+80 = upper ~25% of frame
+    # Avoids YouTube timestamp (bottom-right) and progress bar (bottom)
     cmd = [
         "convert", image_path,
         "-resize", "1280x720!",
-        # Create text with stroke (outline) and shadow
-        "(", "+clone",
-        "-size", "1280x720", "xc:none",
+        # Blurred shadow behind text for depth
+        "(", "-clone", "0",
+        "-fill", "none",
         "-font", font,
         "-pointsize", str(pointsize),
-        "-gravity", "center",
-        # Draw outline (stroke)
+        "-gravity", "North",
+        "-stroke", "black",
+        "-strokewidth", "8",
+        "-annotate", "+0+85", overlay_text,
+        "-blur", "0x4",
+        ")",
+        "-composite",
+        # Crisp text with outline
+        "-font", font,
+        "-pointsize", str(pointsize),
+        "-gravity", "North",
         "-stroke", outline_color,
         "-strokewidth", str(stroke_width),
-        "-annotate", "+0+200", overlay_text,
-        # Draw fill on top
+        "-annotate", "+0+80", overlay_text,
+        # Fill text on top of outline
         "-stroke", "none",
         "-fill", color,
-        "-annotate", "+0+200", overlay_text,
-        ")",
-        "-gravity", "center",
-        "-composite",
-        # Add drop shadow via a shadow layer
+        "-annotate", "+0+80", overlay_text,
         output_path,
     ]
 
