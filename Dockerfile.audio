@@ -181,8 +181,9 @@ print(f'torch={torch.__version__}, numpy={numpy.__version__}, transformers={tran
 print('=== Audio endpoint environment verified ===')"
 
 # ── Handler ──────────────────────────────────────────────────
-RUN uv pip install runpod requests websocket-client
+RUN uv pip install runpod requests websocket-client boto3
 
+COPY r2_helper.py /r2_helper.py
 COPY handler_audio.py /handler.py
 COPY start_audio.sh /start.sh
 RUN chmod +x /start.sh

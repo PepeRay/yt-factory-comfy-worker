@@ -17,6 +17,19 @@ import glob as glob_module
 import runpod
 import websocket
 
+# R2 storage (Cloudflare) — enabled when env vars are set
+try:
+    import r2_helper
+    R2_ENABLED = bool(
+        os.environ.get("R2_ENDPOINT")
+        and os.environ.get("R2_ACCESS_KEY_ID")
+        and os.environ.get("R2_SECRET_ACCESS_KEY")
+    )
+    if R2_ENABLED:
+        print("[INFO] R2 storage enabled — dual-write mode (NV + R2)")
+except ImportError:
+    R2_ENABLED = False
+
 COMFY_HOST = "127.0.0.1:8188"
 COMFY_API_AVAILABLE_INTERVAL_MS = int(os.environ.get("COMFY_API_AVAILABLE_INTERVAL_MS", 500))
 COMFY_API_AVAILABLE_MAX_RETRIES = int(os.environ.get("COMFY_API_AVAILABLE_MAX_RETRIES", 240))
@@ -224,15 +237,39 @@ def collect_and_move(prompt_id, dest_dir, prefix, index=None):
 
 # ── Compose (FFmpeg) — concat_audio only ────────────────────
 
-def _compose_concat_audio(src, dest, content_id):
+def _compose_concat_audio(src, dest, content_id, channel=None, platform=None):
     """Concatenate all audio chunks into a single file."""
     audio_dir = os.path.join(src, "audio")
-    if not os.path.isdir(audio_dir):
-        raise RuntimeError(f"No audio directory found: {audio_dir}")
+    chunks = []
+    r2_temp_dir = None
 
-    chunks = sorted(glob_module.glob(os.path.join(audio_dir, "chunk_*")))
+    # Try NV first
+    if os.path.isdir(audio_dir):
+        chunks = sorted(glob_module.glob(os.path.join(audio_dir, "chunk_*")))
+
+    # Fallback: download from R2
+    if not chunks and R2_ENABLED and channel:
+        r2_prefix = f"{channel}/{content_id}/source/audio/"
+        try:
+            r2_keys = r2_helper.list_files(r2_prefix)
+            chunk_keys = sorted(
+                [k for k in r2_keys if os.path.basename(k).startswith("chunk_")]
+            )
+            if chunk_keys:
+                r2_temp_dir = f"/tmp/r2_audio_{content_id}"
+                os.makedirs(r2_temp_dir, exist_ok=True)
+                for key in chunk_keys:
+                    local_path = os.path.join(r2_temp_dir, os.path.basename(key))
+                    r2_helper.download_file(key, local_path)
+                    chunks.append(local_path)
+                print(f"[INFO] Downloaded {len(chunks)} audio chunks from R2")
+        except Exception as e:
+            print(f"[WARN] R2 download failed: {e}")
+
     if not chunks:
-        raise RuntimeError(f"No audio chunks found in {audio_dir}")
+        raise RuntimeError(
+            f"No audio chunks found in NV ({audio_dir}) or R2"
+        )
 
     concat_list = os.path.join(dest, "concat_list.txt")
     with open(concat_list, "w") as f:
@@ -250,8 +287,26 @@ def _compose_concat_audio(src, dest, content_id):
         raise RuntimeError(f"FFmpeg concat_audio failed: {result.stderr[:500]}")
 
     os.remove(concat_list)
-    return [{"filename": f"{content_id}_audio.flac", "path": output_path,
-             "size_mb": round(os.path.getsize(output_path) / 1024 / 1024, 2)}]
+
+    # Clean up R2 temp files
+    if r2_temp_dir and os.path.isdir(r2_temp_dir):
+        shutil.rmtree(r2_temp_dir, ignore_errors=True)
+
+    results = [{"filename": f"{content_id}_audio.flac", "path": output_path,
+                "size_mb": round(os.path.getsize(output_path) / 1024 / 1024, 2)}]
+
+    # Upload compose output to R2
+    if R2_ENABLED and channel and platform:
+        r2_key = f"{channel}/{content_id}/output/{platform}/{content_id}_audio.flac"
+        try:
+            r2_helper.upload_file(output_path, r2_key)
+            results[0]["r2_key"] = r2_key
+            results[0]["r2_url"] = r2_helper.presigned_url(r2_key)
+            print(f"[INFO] Compose output uploaded to R2: {r2_key}")
+        except Exception as e:
+            print(f"[WARN] R2 upload failed for compose output: {e}")
+
+    return results
 
 
 def run_compose(channel, content_id, platform, compose_config):
@@ -266,7 +321,7 @@ def run_compose(channel, content_id, platform, compose_config):
     compose_type = compose_config.get("type", "concat_audio")
 
     if compose_type == "concat_audio":
-        return _compose_concat_audio(src, dest, content_id)
+        return _compose_concat_audio(src, dest, content_id, channel=channel, platform=platform)
     else:
         raise RuntimeError(
             f"Audio endpoint only supports compose type 'concat_audio'. Got: {compose_type}"
@@ -352,6 +407,20 @@ def handler(job):
         ws.close()
 
     results = collect_and_move(prompt_id, dest, prefix, index=index)
+
+    # Upload to R2 (dual-write: NV + R2 during migration)
+    if R2_ENABLED:
+        r2_prefix = f"{channel}/{content_id}/source/{media_type}"
+        for result in results:
+            filepath = result.get("path")
+            if filepath and os.path.exists(filepath):
+                r2_key = f"{r2_prefix}/{result['filename']}"
+                try:
+                    r2_helper.upload_file(filepath, r2_key)
+                    result["r2_key"] = r2_key
+                    result["r2_url"] = r2_helper.presigned_url(r2_key)
+                except Exception as e:
+                    print(f"[WARN] R2 upload failed for {result['filename']}: {e}")
 
     # Release VRAM so next job starts with clean GPU memory
     free_vram()
