@@ -117,8 +117,9 @@ print(f'torch={torch.__version__}, numpy={numpy.__version__}, transformers={tran
 print('=== Images endpoint environment verified ===')"
 
 # ── Handler ──────────────────────────────────────────────────
-RUN uv pip install runpod requests websocket-client
+RUN uv pip install runpod requests websocket-client boto3
 
+COPY r2_helper.py /r2_helper.py
 COPY handler_images.py /handler.py
 COPY start_images.sh /start.sh
 RUN chmod +x /start.sh

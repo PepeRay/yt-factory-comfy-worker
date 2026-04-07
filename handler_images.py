@@ -18,6 +18,19 @@ import base64
 import runpod
 import websocket
 
+# R2 storage (Cloudflare) — enabled when env vars are set
+try:
+    import r2_helper
+    R2_ENABLED = bool(
+        os.environ.get("R2_ENDPOINT")
+        and os.environ.get("R2_ACCESS_KEY_ID")
+        and os.environ.get("R2_SECRET_ACCESS_KEY")
+    )
+    if R2_ENABLED:
+        print("[INFO] R2 storage enabled — dual-write mode (NV + R2)")
+except ImportError:
+    R2_ENABLED = False
+
 COMFY_HOST = "127.0.0.1:8188"
 COMFY_API_AVAILABLE_INTERVAL_MS = int(os.environ.get("COMFY_API_AVAILABLE_INTERVAL_MS", 500))
 COMFY_API_AVAILABLE_MAX_RETRIES = int(os.environ.get("COMFY_API_AVAILABLE_MAX_RETRIES", 240))
@@ -360,6 +373,20 @@ def handler(job):
 
     results = collect_and_move(prompt_id, dest, prefix, index=index)
 
+    # Upload to R2 (dual-write: NV + R2 during migration)
+    if R2_ENABLED:
+        r2_prefix = f"{channel}/{content_id}/source/{media_type}"
+        for result in results:
+            filepath = result.get("path")
+            if filepath and os.path.exists(filepath):
+                r2_key = f"{r2_prefix}/{result['filename']}"
+                try:
+                    r2_helper.upload_file(filepath, r2_key)
+                    result["r2_key"] = r2_key
+                    result["r2_url"] = r2_helper.presigned_url(r2_key)
+                except Exception as e:
+                    print(f"[WARN] R2 upload failed for {result['filename']}: {e}")
+
     # ── Thumbnail post-processing + text overlay (only if overlay_text provided) ──
     overlay_text = job_input.get("overlay_text")
     thumbnail_b64 = None
@@ -389,12 +416,22 @@ def handler(job):
         if result_path and os.path.exists(result_path):
             overlay_applied = True
             thumbnail_b64 = image_to_base64(result_path)
-            results.append({
+            thumb_entry = {
                 "filename": f"{prefix}_final.png",
                 "path": result_path,
                 "node_id": "text_overlay",
                 "size_mb": round(os.path.getsize(result_path) / 1024 / 1024, 2),
-            })
+            }
+            # Upload thumbnail to R2
+            if R2_ENABLED:
+                r2_key = f"{channel}/{content_id}/source/{media_type}/{prefix}_final.png"
+                try:
+                    r2_helper.upload_file(result_path, r2_key)
+                    thumb_entry["r2_key"] = r2_key
+                    thumb_entry["r2_url"] = r2_helper.presigned_url(r2_key)
+                except Exception as e:
+                    print(f"[WARN] R2 upload failed for thumbnail: {e}")
+            results.append(thumb_entry)
 
     free_vram()
 
