@@ -63,6 +63,7 @@ COPY extra_model_paths.yaml ./
 #   Power Lora Loader, Any Switch → rgthree-comfy (WAS MISSING — FIXED)
 #   CM_IntToFloat → comfymath
 #   easy cleanGpuUsed, easy clearCacheAll → comfyui-easy-use (VRAM cleanup mid-pipeline)
+#   LTXVFirstLastFrameControl_TTP → Comfyui_TTP_Toolset (git clone, no pip deps needed)
 RUN comfy node install comfyui-ltxvideo || true && \
     comfy node install comfyui-videohelpersuite || true && \
     comfy node install comfyui-kjnodes || true && \
@@ -71,6 +72,11 @@ RUN comfy node install comfyui-ltxvideo || true && \
     comfy node install rgthree-comfy || true && \
     comfy node install comfymath || true && \
     comfy node install comfyui-easy-use || true
+
+# TTP Toolset — git clone (comfy node install unreliable for this package)
+RUN cd /comfyui/custom_nodes && \
+    git clone https://github.com/TTPlanetPig/Comfyui_TTP_Toolset.git && \
+    echo "=== TTP Toolset installed ==="
 
 WORKDIR /
 
@@ -134,6 +140,11 @@ import lark; \
 import matplotlib; \
 print(f'torch={torch.__version__}, numpy={numpy.__version__}, transformers={transformers.__version__}'); \
 print('=== Video endpoint environment verified ===')"
+
+# ── Verify custom nodes (build-time gate) ───────────────────
+RUN test -d /comfyui/custom_nodes/Comfyui_TTP_Toolset && \
+    test -f /comfyui/custom_nodes/Comfyui_TTP_Toolset/__init__.py && \
+    echo "=== TTP Toolset custom node verified ==="
 
 # ── Handler ──────────────────────────────────────────────────
 RUN uv pip install runpod requests websocket-client
