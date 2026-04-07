@@ -151,19 +151,24 @@ jobs:
       - name: Update RunPod templates
         env:
           RUNPOD_API_KEY: ${{ secrets.RUNPOD_API_KEY }}
+          R2_ENDPOINT: ${{ secrets.R2_ENDPOINT }}
+          R2_ACCESS_KEY_ID: ${{ secrets.R2_ACCESS_KEY_ID }}
+          R2_SECRET_ACCESS_KEY: ${{ secrets.R2_SECRET_ACCESS_KEY }}
+          R2_BUCKET: ${{ secrets.R2_BUCKET }}
         run: |
           SHA="${{ github.sha }}"
           PREFIX="ghcr.io/peperay/yt-factory"
 
+          # R2 env vars — preserved across deploys via GitHub Secrets
+          R2_ENV="{key: \\\"R2_ENDPOINT\\\", value: \\\"${R2_ENDPOINT}\\\"}, {key: \\\"R2_ACCESS_KEY_ID\\\", value: \\\"${R2_ACCESS_KEY_ID}\\\"}, {key: \\\"R2_SECRET_ACCESS_KEY\\\", value: \\\"${R2_SECRET_ACCESS_KEY}\\\"}, {key: \\\"R2_BUCKET\\\", value: \\\"${R2_BUCKET}\\\"}"
+
           update_template() {
             local id=$1 name=$2 image=$3
             echo "Updating $name → $image"
-            # Only update imageName — do NOT send env/dockerArgs/volumeInGb
-            # to preserve manually configured environment variables (R2 keys, etc.)
             curl -s -X POST https://api.runpod.io/graphql \
               -H "Content-Type: application/json" \
               -H "Authorization: Bearer $RUNPOD_API_KEY" \
-              -d "{\"query\": \"mutation { saveTemplate(input: { id: \\\"$id\\\", name: \\\"$name\\\", imageName: \\\"$image\\\", containerDiskInGb: 20 }) { id name imageName } }\"}"
+              -d "{\"query\": \"mutation { saveTemplate(input: { id: \\\"$id\\\", name: \\\"$name\\\", imageName: \\\"$image\\\", containerDiskInGb: 20, volumeInGb: 0, dockerArgs: \\\"\\\", env: [$R2_ENV] }) { id name imageName } }\"}"
             echo ""
           }
 
