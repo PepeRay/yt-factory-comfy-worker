@@ -35,6 +35,21 @@ ACCEPTED_JOB_TYPES = {
     "txt-img": "images",
 }
 
+def free_vram():
+    """Call ComfyUI /free endpoint to unload models and release VRAM/RAM between jobs."""
+    try:
+        data = json.dumps({"unload_models": True, "free_memory": True}).encode("utf-8")
+        req = urllib.request.Request(
+            f"http://{COMFY_HOST}/free",
+            data=data,
+            headers={"Content-Type": "application/json"},
+        )
+        urllib.request.urlopen(req, timeout=30)
+    except Exception as e:
+        print(f"[WARN] free_vram failed: {e}")
+
+
+
 
 def project_dir(channel, content_id):
     return os.path.join(PROJECTS_ROOT, channel, content_id)
@@ -339,6 +354,8 @@ def handler(job):
                 "node_id": "text_overlay",
                 "size_mb": round(os.path.getsize(result_path) / 1024 / 1024, 2),
             })
+
+    free_vram()
 
     return {
         "status": "success",
