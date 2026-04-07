@@ -158,10 +158,12 @@ jobs:
           update_template() {
             local id=$1 name=$2 image=$3
             echo "Updating $name → $image"
+            # Only update imageName — do NOT send env/dockerArgs/volumeInGb
+            # to preserve manually configured environment variables (R2 keys, etc.)
             curl -s -X POST https://api.runpod.io/graphql \
               -H "Content-Type: application/json" \
               -H "Authorization: Bearer $RUNPOD_API_KEY" \
-              -d "{\"query\": \"mutation { saveTemplate(input: { id: \\\"$id\\\", name: \\\"$name\\\", imageName: \\\"$image\\\", containerDiskInGb: 20, volumeInGb: 0, dockerArgs: \\\"\\\", env: [] }) { id name imageName } }\"}"
+              -d "{\"query\": \"mutation { saveTemplate(input: { id: \\\"$id\\\", name: \\\"$name\\\", imageName: \\\"$image\\\", containerDiskInGb: 20 }) { id name imageName } }\"}"
             echo ""
           }
 
