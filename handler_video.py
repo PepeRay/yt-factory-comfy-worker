@@ -251,20 +251,21 @@ def _compose_scene_manifest(src, dest, content_id, config, channel, platform="yo
     Phase 2: Apply transitions between segments (cut, dissolve, fade_black, fade_white)
     Phase 3: Mux with audio, background music, and optional subtitles
     """
-    # Load scenes.json
-    scenes_path = config.get("scenes_path", os.path.join(src, "..", "config", "scenes.json"))
-    if not os.path.exists(scenes_path):
-        # Try alternate location
-        scenes_path = os.path.join(os.path.dirname(src), "config", "scenes.json")
-    if not os.path.exists(scenes_path):
-        raise RuntimeError(f"scenes.json not found at {scenes_path}")
-
-    with open(scenes_path, "r") as f:
-        scenes_data = json.load(f)
-
-    scenes = scenes_data.get("scenes", [])
+    # Load scenes - prefer inline from payload, fallback to NV file
+    if config.get("scenes"):
+        scenes = config["scenes"]
+        scenes_data = {"scenes": scenes, "music_acts": config.get("music_acts", [])}
+    else:
+        scenes_path = config.get("scenes_path", os.path.join(src, "..", "config", "scenes.json"))
+        if not os.path.exists(scenes_path):
+            scenes_path = os.path.join(os.path.dirname(src), "config", "scenes.json")
+        if not os.path.exists(scenes_path):
+            raise RuntimeError(f"scenes.json not found at {scenes_path}")
+        with open(scenes_path, "r") as f:
+            scenes_data = json.load(f)
+        scenes = scenes_data.get("scenes", [])
     if not scenes:
-        raise RuntimeError("scenes.json has no scenes")
+        raise RuntimeError("No scenes provided (inline or file)")
 
     img_dir = os.path.join(src, "images")
     vid_dir = os.path.join(src, "video")
