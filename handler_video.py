@@ -853,6 +853,18 @@ def handler(job):
     except Exception as e:
         return {"error": f"Failed to connect websocket: {str(e)}"}
 
+    # Resolve LoadImage paths (handle naming variations: scene_000_initial.png vs scene_000_initial_000.png)
+    for node_id, node_data in workflow.items():
+        if node_data.get("class_type") == "LoadImage":
+            img_path = node_data.get("inputs", {}).get("image", "")
+            if img_path and not os.path.exists(img_path):
+                # Try glob fallback for naming variations
+                base, ext = os.path.splitext(img_path)
+                candidates = sorted(glob_module.glob(f"{base}_*{ext}"))
+                if candidates:
+                    resolved = candidates[-1]  # Last = most refined
+                    node_data["inputs"]["image"] = resolved
+
     try:
         prompt_id = queue_prompt(workflow, client_id)
     except Exception as e:
