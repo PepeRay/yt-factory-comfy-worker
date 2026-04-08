@@ -1,6 +1,6 @@
 """
 YouTube Factory — Audio Endpoint Handler
-Job types: txt-voice, voice-srt, compose (concat_audio only)
+Job types: txt-voice, voice-srt, compose (concat_audio only), upload-inputs (temp)
 Models: VibeVoice TTS, Whisper STT
 """
 
@@ -35,9 +35,13 @@ COMFY_API_AVAILABLE_INTERVAL_MS = int(os.environ.get("COMFY_API_AVAILABLE_INTERV
 COMFY_API_AVAILABLE_MAX_RETRIES = int(os.environ.get("COMFY_API_AVAILABLE_MAX_RETRIES", 480))
 COMFY_EXECUTION_TIMEOUT = int(os.environ.get("COMFY_EXECUTION_TIMEOUT", 600))
 NETWORK_VOLUME_PATH = os.environ.get("RUNPOD_NETWORK_VOLUME_PATH", "/runpod-volume")
-PROJECTS_ROOT = os.path.join(NETWORK_VOLUME_PATH, "projects")
+if os.path.isdir(NETWORK_VOLUME_PATH):
+    PROJECTS_ROOT = os.path.join(NETWORK_VOLUME_PATH, "projects")
+else:
+    PROJECTS_ROOT = "/tmp/projects"
+os.makedirs(PROJECTS_ROOT, exist_ok=True)
 
-OUTPUT_DIRS = [
+_OUTPUT_DIR_CANDIDATES = [
     "/comfyui/output",
     f"{NETWORK_VOLUME_PATH}/ComfyUI/output",
     "/comfyui/temp",
@@ -149,11 +153,12 @@ def get_history(prompt_id):
 def find_output_file(filename, subfolder=""):
     if not filename:
         return None
-    for out_dir in OUTPUT_DIRS:
+    output_dirs = [d for d in _OUTPUT_DIR_CANDIDATES if os.path.isdir(d)]
+    for out_dir in output_dirs:
         candidate = os.path.join(out_dir, subfolder, filename)
         if os.path.exists(candidate):
             return candidate
-    for out_dir in OUTPUT_DIRS:
+    for out_dir in output_dirs:
         pattern = os.path.join(out_dir, "**", filename)
         matches = glob_module.glob(pattern, recursive=True)
         if matches:
@@ -333,7 +338,7 @@ def run_compose(channel, content_id, platform, compose_config):
 def handler(job):
     """
     Audio Endpoint Handler.
-    Accepts: txt-voice (TTS), voice-srt (Whisper STT), compose (concat_audio)
+    Accepts: txt-voice (TTS), voice-srt (Whisper STT), compose (concat_audio), upload-inputs (temp)
     """
     job_input = job.get("input", {})
 
@@ -343,6 +348,56 @@ def handler(job):
 
     if not job_type:
         return {"error": "Missing required field: job_type"}
+
+    # ── Upload-inputs: scan NV and upload input files to R2 ──
+    if job_type == "upload-inputs":
+        if not R2_ENABLED:
+            return {"error": "R2 is not enabled — cannot upload inputs"}
+
+        uploaded = []
+        input_dir = os.path.join(NETWORK_VOLUME_PATH, "ComfyUI", "input")
+
+        # 1) Upload all files from ComfyUI/input/
+        if os.path.isdir(input_dir):
+            for fname in os.listdir(input_dir):
+                fpath = os.path.join(input_dir, fname)
+                if os.path.isfile(fpath):
+                    r2_key = f"inputs/audio/{fname}"
+                    try:
+                        r2_helper.upload_file(fpath, r2_key)
+                        uploaded.append({
+                            "local_path": fpath,
+                            "r2_key": r2_key,
+                            "r2_url": r2_helper.presigned_url(r2_key),
+                        })
+                    except Exception as e:
+                        print(f"[WARN] upload-inputs: failed {fpath}: {e}")
+
+        # 2) Upload music/ dirs from each channel under projects/
+        if os.path.isdir(PROJECTS_ROOT):
+            for channel_name in os.listdir(PROJECTS_ROOT):
+                music_dir = os.path.join(PROJECTS_ROOT, channel_name, "music")
+                if os.path.isdir(music_dir):
+                    for fname in os.listdir(music_dir):
+                        fpath = os.path.join(music_dir, fname)
+                        if os.path.isfile(fpath):
+                            r2_key = f"{channel_name}/music/{fname}"
+                            try:
+                                r2_helper.upload_file(fpath, r2_key)
+                                uploaded.append({
+                                    "local_path": fpath,
+                                    "r2_key": r2_key,
+                                    "r2_url": r2_helper.presigned_url(r2_key),
+                                })
+                            except Exception as e:
+                                print(f"[WARN] upload-inputs: failed {fpath}: {e}")
+
+        return {
+            "status": "success",
+            "job_type": "upload-inputs",
+            "uploaded": uploaded,
+        }
+
     if not channel:
         return {"error": "Missing required field: channel"}
     if not content_id:

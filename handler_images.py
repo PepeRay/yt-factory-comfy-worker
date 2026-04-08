@@ -36,9 +36,13 @@ COMFY_API_AVAILABLE_INTERVAL_MS = int(os.environ.get("COMFY_API_AVAILABLE_INTERV
 COMFY_API_AVAILABLE_MAX_RETRIES = int(os.environ.get("COMFY_API_AVAILABLE_MAX_RETRIES", 480))
 COMFY_EXECUTION_TIMEOUT = int(os.environ.get("COMFY_EXECUTION_TIMEOUT", 300))
 NETWORK_VOLUME_PATH = os.environ.get("RUNPOD_NETWORK_VOLUME_PATH", "/runpod-volume")
-PROJECTS_ROOT = os.path.join(NETWORK_VOLUME_PATH, "projects")
+if os.path.isdir(NETWORK_VOLUME_PATH):
+    PROJECTS_ROOT = os.path.join(NETWORK_VOLUME_PATH, "projects")
+else:
+    PROJECTS_ROOT = "/tmp/projects"
+os.makedirs(PROJECTS_ROOT, exist_ok=True)
 
-OUTPUT_DIRS = [
+_OUTPUT_DIR_CANDIDATES = [
     "/comfyui/output",
     f"{NETWORK_VOLUME_PATH}/ComfyUI/output",
     "/comfyui/temp",
@@ -159,11 +163,12 @@ def get_history(prompt_id):
 def find_output_file(filename, subfolder=""):
     if not filename:
         return None
-    for out_dir in OUTPUT_DIRS:
+    output_dirs = [d for d in _OUTPUT_DIR_CANDIDATES if os.path.isdir(d)]
+    for out_dir in output_dirs:
         candidate = os.path.join(out_dir, subfolder, filename)
         if os.path.exists(candidate):
             return candidate
-    for out_dir in OUTPUT_DIRS:
+    for out_dir in output_dirs:
         pattern = os.path.join(out_dir, "**", filename)
         matches = glob_module.glob(pattern, recursive=True)
         if matches:

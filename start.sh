@@ -82,7 +82,9 @@ if [ -d "/runpod-volume/ComfyUI" ]; then
         done
     fi
 else
-    echo "WARNING: Network Volume not found at /runpod-volume"
+    echo "INFO: No Network Volume — using baked models"
+    echo "No Network Volume — downloading inputs from R2..."
+    python /download_r2_inputs.py 2>/dev/null || echo "R2 input download skipped"
 fi
 
 # Create jobs output directory

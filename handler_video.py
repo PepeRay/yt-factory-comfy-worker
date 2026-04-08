@@ -18,6 +18,12 @@ import glob as glob_module
 import runpod
 import websocket
 
+# R2-based input downloader (music, ComfyUI inputs)
+try:
+    from download_r2_inputs import download_music as _download_music_r2
+except ImportError:
+    _download_music_r2 = None
+
 # R2 storage (Cloudflare) — enabled when env vars are set
 try:
     import r2_helper
@@ -36,9 +42,13 @@ COMFY_API_AVAILABLE_INTERVAL_MS = int(os.environ.get("COMFY_API_AVAILABLE_INTERV
 COMFY_API_AVAILABLE_MAX_RETRIES = int(os.environ.get("COMFY_API_AVAILABLE_MAX_RETRIES", 480))
 COMFY_EXECUTION_TIMEOUT = int(os.environ.get("COMFY_EXECUTION_TIMEOUT", 600))
 NETWORK_VOLUME_PATH = os.environ.get("RUNPOD_NETWORK_VOLUME_PATH", "/runpod-volume")
-PROJECTS_ROOT = os.path.join(NETWORK_VOLUME_PATH, "projects")
+if os.path.isdir(NETWORK_VOLUME_PATH):
+    PROJECTS_ROOT = os.path.join(NETWORK_VOLUME_PATH, "projects")
+else:
+    PROJECTS_ROOT = "/tmp/projects"
+os.makedirs(PROJECTS_ROOT, exist_ok=True)
 
-OUTPUT_DIRS = [
+_OUTPUT_DIR_CANDIDATES = [
     "/comfyui/output",
     f"{NETWORK_VOLUME_PATH}/ComfyUI/output",
     "/comfyui/temp",
@@ -176,11 +186,12 @@ def get_history(prompt_id):
 def find_output_file(filename, subfolder=""):
     if not filename:
         return None
-    for out_dir in OUTPUT_DIRS:
+    output_dirs = [d for d in _OUTPUT_DIR_CANDIDATES if os.path.isdir(d)]
+    for out_dir in output_dirs:
         candidate = os.path.join(out_dir, subfolder, filename)
         if os.path.exists(candidate):
             return candidate
-    for out_dir in OUTPUT_DIRS:
+    for out_dir in output_dirs:
         pattern = os.path.join(out_dir, "**", filename)
         matches = glob_module.glob(pattern, recursive=True)
         if matches:
@@ -568,6 +579,14 @@ def _compose_scene_manifest(src, dest, content_id, config, channel, platform="yo
     # ── Music assembly: multi-act tracks with crossfades + fade in/out ──
     music_path = None
     music_dir = os.path.join(PROJECTS_ROOT, channel, "music")
+    # Fallback: download music from R2 if NV music dir is missing/empty
+    if not os.path.isdir(music_dir) or not os.listdir(music_dir):
+        if R2_ENABLED and _download_music_r2:
+            try:
+                music_dir = _download_music_r2(channel)
+                print(f"[INFO] Music downloaded from R2 → {music_dir}")
+            except Exception as e:
+                print(f"[WARN] R2 music download failed: {e}")
     if os.path.isdir(music_dir):
         # Read per-act moods or fallback to single music_mood
         music_acts = scenes_data.get("music_acts", None)
@@ -869,7 +888,7 @@ def handler(job):
     if not content_id:
         return {"error": "Missing required field: content_id"}
 
-    # Download jobs (retrieve file from NV as base64)
+    # Download jobs (retrieve file from NV or R2 as base64)
     if job_type == "download":
         platform = job_input.get("platform", "youtube")
         filename = job_input.get("filename")
@@ -878,6 +897,15 @@ def handler(job):
         file_path = os.path.join(
             output_dir_for(channel, content_id, platform), filename
         )
+        # Fallback: download from R2 if not on local disk
+        if not os.path.isfile(file_path) and R2_ENABLED:
+            r2_key = f"{channel}/{content_id}/output/{platform}/{filename}"
+            try:
+                os.makedirs(os.path.dirname(file_path), exist_ok=True)
+                r2_helper.download_file(r2_key, file_path)
+                print(f"[INFO] Downloaded {r2_key} from R2 for download job")
+            except Exception as e:
+                print(f"[WARN] R2 download fallback failed: {e}")
         if not os.path.isfile(file_path):
             return {"error": f"File not found: {file_path}"}
         size_mb = round(os.path.getsize(file_path) / 1024 / 1024, 2)
