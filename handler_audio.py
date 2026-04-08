@@ -409,7 +409,6 @@ def handler(job):
     results = collect_and_move(prompt_id, dest, prefix, index=index)
 
     # Upload to R2 (dual-write: NV + R2 during migration)
-    r2_errors = []
     if R2_ENABLED:
         r2_prefix = f"{channel}/{content_id}/source/{media_type}"
         for result in results:
@@ -421,9 +420,7 @@ def handler(job):
                     result["r2_key"] = r2_key
                     result["r2_url"] = r2_helper.presigned_url(r2_key)
                 except Exception as e:
-                    err_msg = f"{result['filename']}: {type(e).__name__}: {e}"
-                    print(f"[WARN] R2 upload failed for {err_msg}")
-                    r2_errors.append(err_msg)
+                    print(f"[WARN] R2 upload failed for {result['filename']}: {e}")
 
     # Release VRAM so next job starts with clean GPU memory
     free_vram()
@@ -435,16 +432,6 @@ def handler(job):
         "content_id": content_id,
         "output_dir": dest,
         "outputs": results,
-        "r2_debug": {
-            "r2_enabled": R2_ENABLED,
-            "env_endpoint": bool(os.environ.get("R2_ENDPOINT")),
-            "env_access_key": bool(os.environ.get("R2_ACCESS_KEY_ID")),
-            "env_secret_key": bool(os.environ.get("R2_SECRET_ACCESS_KEY")),
-            "env_bucket": bool(os.environ.get("R2_BUCKET")),
-            "r2_errors": r2_errors,
-            "results_count": len(results),
-            "results_with_path": sum(1 for r in results if r.get("path") and os.path.exists(r.get("path", ""))),
-        },
     }
 
 
