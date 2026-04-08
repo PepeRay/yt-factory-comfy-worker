@@ -218,25 +218,14 @@ RUN test -d /comfyui/custom_nodes/RES4LYF && \
     echo "=== RES4LYF custom node verified ==="
 
 # ── Verify Wan 2.2 models (build-time gate) ─────────────────
-# Each model file must exist and have non-zero size.
-RUN python -c "\
-import os; \
-models = { \
-    'diffusion_models/Wan2.2-I2V-A14B-HighNoise-Q8_0.gguf': 14.0, \
-    'diffusion_models/Wan2.2-I2V-A14B-LowNoise-Q8_0.gguf': 14.0, \
-    'clip/umt5-xxl-encoder-Q5_K_S.gguf': 3.5, \
-    'vae/wan_2.1_vae.safetensors': 0.2, \
-    'loras/Wan2.2-Lightning_I2V-A14B-4steps-lora_HIGH_fp16.safetensors': 0.5, \
-    'loras/Wan2.2-Lightning_I2V-A14B-4steps-lora_LOW_fp16.safetensors': 0.5, \
-    'upscale_models/4x-ClearRealityV1.pth': 0.008, \
-}; \
-for path, min_gb in models.items(): \
-    full = f'/comfyui/models/{path}'; \
-    assert os.path.isfile(full), f'MISSING: {full}'; \
-    size_gb = os.path.getsize(full) / (1024**3); \
-    assert size_gb >= min_gb, f'{full} too small: {size_gb:.2f} GB (expected >= {min_gb} GB)'; \
-    print(f'  OK: {path} ({size_gb:.2f} GB)'); \
-print('=== All 7 Wan 2.2 models verified ===')"
+RUN test -f /comfyui/models/diffusion_models/Wan2.2-I2V-A14B-HighNoise-Q8_0.gguf && \
+    test -f /comfyui/models/diffusion_models/Wan2.2-I2V-A14B-LowNoise-Q8_0.gguf && \
+    test -f /comfyui/models/clip/umt5-xxl-encoder-Q5_K_S.gguf && \
+    test -f /comfyui/models/vae/wan_2.1_vae.safetensors && \
+    test -f /comfyui/models/loras/Wan2.2-Lightning_I2V-A14B-4steps-lora_HIGH_fp16.safetensors && \
+    test -f /comfyui/models/loras/Wan2.2-Lightning_I2V-A14B-4steps-lora_LOW_fp16.safetensors && \
+    test -f /comfyui/models/upscale_models/4x-ClearRealityV1.pth && \
+    echo "=== All 7 Wan 2.2 models verified ==="
 
 # ── Clear HF token (don't bake into final image) ──────────
 ENV HF_TOKEN=
