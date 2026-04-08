@@ -1,0 +1,233 @@
+# === YouTube Factory — Video Base Image ===
+# Contains: ComfyUI + custom nodes + ALL models + Python deps
+# Rebuild only when models or core deps change
+# CI/CD Dockerfile.video does: FROM this + COPY handlers
+
+ARG BASE_IMAGE=nvidia/cuda:12.6.3-cudnn-runtime-ubuntu24.04
+
+FROM ${BASE_IMAGE} AS base
+
+ARG COMFYUI_VERSION=0.18.2
+
+ENV DEBIAN_FRONTEND=noninteractive
+ENV PIP_PREFER_BINARY=1
+ENV PYTHONUNBUFFERED=1
+ENV CMAKE_BUILD_PARALLEL_LEVEL=8
+
+# System dependencies
+RUN apt-get update && apt-get install -y \
+    python3.12 \
+    python3.12-venv \
+    python3.12-dev \
+    git \
+    wget \
+    libgl1 \
+    libglib2.0-0 \
+    ffmpeg \
+    && ln -sf /usr/bin/python3.12 /usr/bin/python \
+    && ln -sf /usr/bin/pip3 /usr/bin/pip \
+    && apt-get autoremove -y && apt-get clean -y && rm -rf /var/lib/apt/lists/*
+
+# Install uv + venv
+RUN wget -qO- https://astral.sh/uv/install.sh | sh \
+    && ln -s /root/.local/bin/uv /usr/local/bin/uv \
+    && ln -s /root/.local/bin/uvx /usr/local/bin/uvx \
+    && uv venv /opt/venv
+
+ENV PATH="/opt/venv/bin:${PATH}"
+
+# ── ComfyUI Core ────────────────────────────────────────────
+RUN uv pip install comfy-cli pip setuptools wheel
+
+RUN /usr/bin/yes | comfy --workspace /comfyui install --version "${COMFYUI_VERSION}" --nvidia
+
+RUN uv pip install --force-reinstall torch torchvision torchaudio --index-url https://download.pytorch.org/whl/cu126
+
+WORKDIR /comfyui
+
+RUN grep -v -i -E '^(torch==|torch>=|torch<=|torchvision==|torchvision>=|torchaudio==|torchaudio>=|nvidia)' requirements.txt > /tmp/reqs_no_torch.txt && \
+    uv pip install -r /tmp/reqs_no_torch.txt && \
+    rm /tmp/reqs_no_torch.txt
+
+# ── Custom Nodes: VIDEO ONLY ────────────────────────────────
+# What test_v2_img-vid workflow uses:
+#   LTXV* nodes → comfyui-ltxvideo
+#   VHS_VideoCombine → comfyui-videohelpersuite
+#   VAELoaderKJ, ResizeImagesByLongerEdge, ImageResizeKJv2 → comfyui-kjnodes
+#   MathExpression|pysssss → comfyui-custom-scripts
+#   UnetLoaderGGUF → comfyui-gguf (WAS MISSING — FIXED)
+#   Power Lora Loader, Any Switch → rgthree-comfy (WAS MISSING — FIXED)
+#   CM_IntToFloat → comfymath
+#   easy cleanGpuUsed, easy clearCacheAll → comfyui-easy-use (VRAM cleanup mid-pipeline)
+#   LTXVFirstLastFrameControl_TTP → Comfyui_TTP_Toolset (git clone, patched for 0.18.2)
+#   Frames Slice → RES4LYF (git clone, was NV-only — now baked)
+RUN comfy node install comfyui-ltxvideo || true && \
+    comfy node install comfyui-videohelpersuite || true && \
+    comfy node install comfyui-kjnodes || true && \
+    comfy node install comfyui-custom-scripts || true && \
+    comfy node install comfyui-gguf || true && \
+    comfy node install rgthree-comfy || true && \
+    comfy node install comfymath || true && \
+    comfy node install comfyui-easy-use || true
+
+# TTP Toolset — git clone + patch for ComfyUI 0.18.2 compatibility
+# Original uses comfy_api (requires ComfyUI >= 0.3.x), patch converts to traditional format
+COPY patch_ttp_toolset.py /tmp/patch_ttp_toolset.py
+RUN cd /comfyui/custom_nodes && \
+    git clone https://github.com/TTPlanetPig/Comfyui_TTP_Toolset.git && \
+    python /tmp/patch_ttp_toolset.py /comfyui/custom_nodes/Comfyui_TTP_Toolset/LTXVFirstLastFrameControl_TTP.py && \
+    rm /tmp/patch_ttp_toolset.py && \
+    echo "=== TTP Toolset installed and patched ==="
+
+# RES4LYF — git clone + install deps (was NV-only, now baked)
+RUN cd /comfyui/custom_nodes && \
+    git clone https://github.com/ClownsharkBatwing/RES4LYF.git && \
+    cd RES4LYF && \
+    if [ -f requirements.txt ]; then \
+        grep -v -i -E '^(torch==|torch>=|torchvision|torchaudio|nvidia)' requirements.txt > /tmp/res4lyf_reqs.txt && \
+        uv pip install -r /tmp/res4lyf_reqs.txt && \
+        rm /tmp/res4lyf_reqs.txt; \
+    fi && \
+    echo "=== RES4LYF installed ==="
+
+WORKDIR /
+
+# ── Video-specific deps ─────────────────────────────────────
+# Includes comfyui-easy-use requirements (diffusers, accelerate, peft, lark, matplotlib)
+# comfy node install puts deps in /comfyui/.venv/ but ComfyUI runs from /opt/venv/
+RUN uv pip install \
+    opencv-python \
+    av \
+    gguf \
+    PyWavelets \
+    diffusers \
+    accelerate \
+    peft \
+    lark \
+    onnxruntime \
+    matplotlib \
+    && echo "=== Video deps installed ==="
+
+# ── Restore critical packages ───────────────────────────────
+RUN uv pip install --force-reinstall \
+    torch torchvision torchaudio --index-url https://download.pytorch.org/whl/cu126 \
+    && uv pip install --force-reinstall numpy \
+    && echo "=== PyTorch + numpy restored ==="
+
+RUN cd /comfyui \
+    && grep -v -i -E '^(torch==|torch>=|torch<=|torchvision|torchaudio|nvidia)' requirements.txt \
+       > /tmp/comfy_reqs_final.txt \
+    && uv pip install -r /tmp/comfy_reqs_final.txt \
+    && rm /tmp/comfy_reqs_final.txt \
+    && echo "=== ComfyUI deps restored ==="
+
+RUN uv pip install comfy-aimdo torchsde comfyui-frontend-package comfy-kitchen blake3 simpleeval \
+    sqlalchemy alembic kornia safetensors einops transformers tokenizers sentencepiece scipy tqdm filelock spandrel \
+    && echo "=== explicit runtime deps installed ==="
+
+# ── Handler runtime deps (needed by handler.py at runtime) ──
+RUN uv pip install runpod requests websocket-client boto3
+
+# ── Model directory structure ───────────────────────────────
+RUN mkdir -p /comfyui/models/{diffusion_models,vae,clip,loras,text_encoders,unet,checkpoints,controlnet,upscale_models,latent_upscale_models,embeddings}
+
+# ── Download models (HEAVY — cached in base image) ─────────
+# Each model is its own RUN layer for Docker cache efficiency.
+# If one download fails, previously cached layers are preserved.
+
+# LTX 2.3 22B GGUF (~22.8 GB)
+RUN wget -q --show-progress -O /comfyui/models/diffusion_models/ltx-2.3-22b-dev-Q8_0.gguf \
+    "https://huggingface.co/unsloth/LTX-2.3-GGUF/resolve/main/ltx-2.3-22b-dev-Q8_0.gguf"
+
+# LTX23 Video VAE (~1.45 GB)
+RUN wget -q --show-progress -O /comfyui/models/vae/LTX23_video_vae_bf16.safetensors \
+    "https://huggingface.co/Kijai/LTX2.3_comfy/resolve/main/vae/LTX23_video_vae_bf16.safetensors"
+
+# LTX23 Audio VAE (~365 MB)
+RUN wget -q --show-progress -O /comfyui/models/vae/LTX23_audio_vae_bf16.safetensors \
+    "https://huggingface.co/Kijai/LTX2.3_comfy/resolve/main/vae/LTX23_audio_vae_bf16.safetensors"
+
+# Spatial Upscaler (~996 MB)
+RUN wget -q --show-progress -O /comfyui/models/upscale_models/ltx-2.3-spatial-upscaler-x2-1.0.safetensors \
+    "https://huggingface.co/Lightricks/LTX-2.3/resolve/main/ltx-2.3-spatial-upscaler-x2-1.0.safetensors"
+
+# Gemma 3 12B text encoder (~6.5 GB)
+RUN wget -q --show-progress -O /comfyui/models/text_encoders/gemma_3_12B_it_fp4_mixed.safetensors \
+    "https://huggingface.co/Comfy-Org/ltx-2/resolve/main/split_files/text_encoders/gemma_3_12B_it_fp4_mixed.safetensors"
+
+# LTX 2.3 Text Projection (~2.31 GB)
+RUN wget -q --show-progress -O /comfyui/models/text_encoders/ltx-2.3_text_projection_bf16.safetensors \
+    "https://huggingface.co/Kijai/LTX2.3_comfy/resolve/main/text_encoders/ltx-2.3_text_projection_bf16.safetensors"
+
+# Distilled LoRA (~7.61 GB)
+RUN wget -q --show-progress -O /comfyui/models/loras/ltx-2.3-22b-distilled-lora-384.safetensors \
+    "https://huggingface.co/Lightricks/LTX-2.3/resolve/main/ltx-2.3-22b-distilled-lora-384.safetensors"
+
+# IC-LoRA Detailer (~2.62 GB)
+RUN wget -q --show-progress -O /comfyui/models/loras/ltx-2-19b-ic-lora-detailer.safetensors \
+    "https://huggingface.co/Lightricks/LTX-2-19b-IC-LoRA-Detailer/resolve/main/ltx-2-19b-ic-lora-detailer.safetensors"
+
+# ── Verify environment (build-time gate) ────────────────────
+# If any import fails, the build fails — no broken images pushed.
+RUN python -c "\
+import torch; \
+import torchvision; \
+import torchaudio; \
+import numpy; \
+import safetensors; \
+import comfy_aimdo; \
+import sqlalchemy; \
+import alembic; \
+import kornia; \
+import av; \
+import PIL; \
+import gguf; \
+import blake3; \
+import einops; \
+import transformers; \
+import spandrel; \
+import pywt; \
+import diffusers; \
+import accelerate; \
+import peft; \
+import lark; \
+import matplotlib; \
+print(f'torch={torch.__version__}, numpy={numpy.__version__}, transformers={transformers.__version__}'); \
+print('=== Video endpoint environment verified ===')"
+
+# ── Verify custom nodes (build-time gate) ───────────────────
+RUN test -d /comfyui/custom_nodes/Comfyui_TTP_Toolset && \
+    test -f /comfyui/custom_nodes/Comfyui_TTP_Toolset/__init__.py && \
+    grep -q "LTXVFirstLastFrameControl_TTP" /comfyui/custom_nodes/Comfyui_TTP_Toolset/__init__.py && \
+    echo "=== TTP Toolset custom node verified ==="
+
+RUN test -d /comfyui/custom_nodes/RES4LYF && \
+    test -f /comfyui/custom_nodes/RES4LYF/__init__.py && \
+    echo "=== RES4LYF custom node verified ==="
+
+# ── Verify models (build-time gate) ─────────────────────────
+# Each model file must exist and have non-zero size.
+RUN python -c "\
+import os; \
+models = { \
+    'diffusion_models/ltx-2.3-22b-dev-Q8_0.gguf': 22.8, \
+    'vae/LTX23_video_vae_bf16.safetensors': 1.0, \
+    'vae/LTX23_audio_vae_bf16.safetensors': 0.3, \
+    'upscale_models/ltx-2.3-spatial-upscaler-x2-1.0.safetensors': 0.9, \
+    'text_encoders/gemma_3_12B_it_fp4_mixed.safetensors': 6.0, \
+    'text_encoders/ltx-2.3_text_projection_bf16.safetensors': 2.0, \
+    'loras/ltx-2.3-22b-distilled-lora-384.safetensors': 7.0, \
+    'loras/ltx-2-19b-ic-lora-detailer.safetensors': 2.0, \
+}; \
+for path, min_gb in models.items(): \
+    full = f'/comfyui/models/{path}'; \
+    assert os.path.isfile(full), f'MISSING: {full}'; \
+    size_gb = os.path.getsize(full) / (1024**3); \
+    assert size_gb >= min_gb, f'{full} too small: {size_gb:.2f} GB (expected >= {min_gb} GB)'; \
+    print(f'  OK: {path} ({size_gb:.2f} GB)'); \
+print('=== All 8 models verified ===')"
+
+ENV RUNPOD_NETWORK_VOLUME_PATH="/runpod-volume"
+
+LABEL description="YT Factory Video base — ComfyUI + LTX 2.3 models + deps (~44 GB)"
+LABEL version="v1"

@@ -1,0 +1,165 @@
+# ============================================================
+# YouTube Factory — BASE IMAGE for Images Endpoint
+# Contains: ComfyUI, custom nodes, Python deps, ALL models
+# Does NOT contain: handler, start script, CMD
+# Build once, rebuild only when models/nodes change.
+# ============================================================
+
+ARG BASE_IMAGE=nvidia/cuda:12.6.3-cudnn-runtime-ubuntu24.04
+
+FROM ${BASE_IMAGE} AS base
+
+ARG COMFYUI_VERSION=0.18.2
+
+ENV DEBIAN_FRONTEND=noninteractive
+ENV PIP_PREFER_BINARY=1
+ENV PYTHONUNBUFFERED=1
+ENV CMAKE_BUILD_PARALLEL_LEVEL=8
+
+# System dependencies
+RUN apt-get update && apt-get install -y \
+    python3.12 \
+    python3.12-venv \
+    python3.12-dev \
+    git \
+    wget \
+    libgl1 \
+    libglib2.0-0 \
+    ffmpeg \
+    imagemagick \
+    && ln -sf /usr/bin/python3.12 /usr/bin/python \
+    && ln -sf /usr/bin/pip3 /usr/bin/pip \
+    && apt-get autoremove -y && apt-get clean -y && rm -rf /var/lib/apt/lists/*
+
+# Install uv + venv
+RUN wget -qO- https://astral.sh/uv/install.sh | sh \
+    && ln -s /root/.local/bin/uv /usr/local/bin/uv \
+    && ln -s /root/.local/bin/uvx /usr/local/bin/uvx \
+    && uv venv /opt/venv
+
+ENV PATH="/opt/venv/bin:${PATH}"
+
+# ── ComfyUI Core ────────────────────────────────────────────
+RUN uv pip install comfy-cli pip setuptools wheel
+
+RUN /usr/bin/yes | comfy --workspace /comfyui install --version "${COMFYUI_VERSION}" --nvidia
+
+RUN uv pip install --force-reinstall torch torchvision torchaudio --index-url https://download.pytorch.org/whl/cu126
+
+WORKDIR /comfyui
+
+RUN grep -v -i -E '^(torch==|torch>=|torch<=|torchvision==|torchvision>=|torchaudio==|torchaudio>=|nvidia)' requirements.txt > /tmp/reqs_no_torch.txt && \
+    uv pip install -r /tmp/reqs_no_torch.txt && \
+    rm /tmp/reqs_no_torch.txt
+
+# ── Custom Nodes: IMAGE ONLY ────────────────────────────────
+# Only what TXT-IMG_API workflow uses:
+#   UnetLoaderGGUF → comfyui-gguf
+#   DetailDaemonSamplerNode → comfyui-detail-daemon
+#   Power Lora Loader → rgthree-comfy
+RUN comfy node install comfyui-gguf || true && \
+    comfy node install comfyui-detail-daemon || true && \
+    comfy node install rgthree-comfy || true
+
+WORKDIR /
+
+# ── Fonts for thumbnail text overlay ─────────────────────────
+RUN mkdir -p /usr/local/share/fonts/bebas-neue \
+    && wget -q "https://github.com/google/fonts/raw/main/ofl/bebasneue/BebasNeue-Regular.ttf" \
+       -O /usr/local/share/fonts/bebas-neue/BebasNeue-Regular.ttf \
+    && fc-cache -f \
+    && echo "=== Bebas Neue font installed ==="
+
+# ── Image-specific deps ─────────────────────────────────────
+RUN uv pip install \
+    opencv-python \
+    gguf \
+    && echo "=== Image deps installed ==="
+
+# ── Restore critical packages ───────────────────────────────
+RUN uv pip install --force-reinstall \
+    torch torchvision torchaudio --index-url https://download.pytorch.org/whl/cu126 \
+    && uv pip install --force-reinstall numpy \
+    && echo "=== PyTorch + numpy restored ==="
+
+RUN cd /comfyui \
+    && grep -v -i -E '^(torch==|torch>=|torch<=|torchvision|torchaudio|nvidia)' requirements.txt \
+       > /tmp/comfy_reqs_final.txt \
+    && uv pip install -r /tmp/comfy_reqs_final.txt \
+    && rm /tmp/comfy_reqs_final.txt \
+    && echo "=== ComfyUI deps restored ==="
+
+RUN uv pip install comfy-aimdo torchsde comfyui-frontend-package comfy-kitchen blake3 simpleeval \
+    sqlalchemy alembic kornia safetensors einops transformers tokenizers sentencepiece scipy tqdm av filelock matplotlib spandrel \
+    && echo "=== explicit runtime deps installed ==="
+
+# ── Handler runtime deps (needed by final image) ────────────
+RUN uv pip install runpod requests websocket-client boto3
+
+# ── Model directories ───────────────────────────────────────
+RUN mkdir -p /comfyui/models/{diffusion_models,vae,clip,loras,text_encoders,unet,checkpoints,controlnet,upscale_models,embeddings}
+
+# ── Model Downloads ─────────────────────────────────────────
+# Flux 2 Klein GGUF (~10 GB)
+RUN wget -q --show-progress -O /comfyui/models/diffusion_models/flux-2-klein-9b-Q8_0.gguf \
+    "https://huggingface.co/unsloth/FLUX.2-klein-9B-GGUF/resolve/main/flux-2-klein-9b-Q8_0.gguf"
+
+# Flux 2 Klein fp8 (~9.4 GB)
+RUN wget -q --show-progress -O /comfyui/models/diffusion_models/flux-2-klein-9b-fp8.safetensors \
+    "https://huggingface.co/black-forest-labs/FLUX.2-klein-9b-fp8/resolve/main/flux-2-klein-9b-fp8.safetensors"
+
+# Flux 2 VAE (~336 MB)
+RUN wget -q --show-progress -O /comfyui/models/vae/flux2-vae.safetensors \
+    "https://huggingface.co/Comfy-Org/flux2-dev/resolve/main/split_files/vae/flux2-vae.safetensors"
+
+# Qwen 3 8B text encoder (~8.2 GB)
+RUN wget -q --show-progress -O /comfyui/models/clip/qwen_3_8b_fp8mixed_abliterated.safetensors \
+    "https://huggingface.co/edicamargo/qwen_3_8b_fp8mixed_abliterated/resolve/main/qwen_3_8b_fp8mixed_abliterated.safetensors"
+
+# NOTE: CivitAI LoRAs require manual download with API token
+# detail_slider_klein_9b_20260123_065513.safetensors — from CivitAI "The Detail Slider - Klein Edition"
+# lenovo_flux_klein9b.safetensors — disabled in workflow
+# nicegirls_flux_klein9b.safetensors — disabled in workflow
+# darkBeastFeb1826Latest_dbkBlitzV15.safetensors — disabled in workflow
+# KLEIN-DETAILER.safetensors — disabled in workflow
+# Copy these manually to /comfyui/models/loras/ before building if needed
+
+# ── Verify environment (build-time gate) ────────────────────
+# If any import fails, the build fails — no broken images pushed.
+RUN python -c "\
+import torch; \
+import torchvision; \
+import numpy; \
+import safetensors; \
+import comfy_aimdo; \
+import sqlalchemy; \
+import alembic; \
+import kornia; \
+import PIL; \
+import gguf; \
+import blake3; \
+import einops; \
+import transformers; \
+import matplotlib; \
+import spandrel; \
+print(f'torch={torch.__version__}, numpy={numpy.__version__}, transformers={transformers.__version__}'); \
+print('=== Images endpoint environment verified ===')"
+
+# ── Verify core models exist ────────────────────────────────
+RUN echo "=== Verifying model files ===" && \
+    test -f /comfyui/models/diffusion_models/flux-2-klein-9b-Q8_0.gguf && \
+    test -f /comfyui/models/diffusion_models/flux-2-klein-9b-fp8.safetensors && \
+    test -f /comfyui/models/vae/flux2-vae.safetensors && \
+    test -f /comfyui/models/clip/qwen_3_8b_fp8mixed_abliterated.safetensors && \
+    echo "=== All core models verified ===" || \
+    (echo "ERROR: Missing model files!" && exit 1)
+
+ENV RUNPOD_NETWORK_VOLUME_PATH="/runpod-volume"
+
+# ── Labels ──────────────────────────────────────────────────
+LABEL maintainer="Raymundo Olivares"
+LABEL project="yt-factory"
+LABEL endpoint="images"
+LABEL type="base"
+LABEL description="Heavy base image with ComfyUI + custom nodes + all models for Images endpoint"
+LABEL models="flux-2-klein-9b-Q8_0.gguf, flux-2-klein-9b-fp8.safetensors, flux2-vae.safetensors, qwen_3_8b_fp8mixed_abliterated.safetensors"
