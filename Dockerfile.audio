@@ -73,15 +73,24 @@ RUN cd /comfyui/custom_nodes \
     && (pip install -r requirements.txt 2>/dev/null || true) \
     && echo "=== VHS installed via git clone ==="
 
-# VibeVoice + TTS-Audio-Suite (from git — same as proven monolithic)
-RUN cd custom_nodes \
-    && (git clone https://github.com/DualOrion/VibeVoice-ComfyUI.git \
-        && cd VibeVoice-ComfyUI && pip install -r requirements.txt 2>/dev/null \
-        || echo "WARN: VibeVoice clone failed — will link from Network Volume") \
-    ; cd /comfyui/custom_nodes \
-    && (git clone https://github.com/DualOrion/TTS-Audio-Suite.git \
-        && cd TTS-Audio-Suite && pip install -r requirements.txt 2>/dev/null \
-        || echo "WARN: TTS-Audio-Suite clone failed — will link from Network Volume")
+# VibeVoice + TTS-Audio-Suite — baked in image (no NV fallback)
+RUN cd /comfyui/custom_nodes \
+    && git clone --recursive https://github.com/DualOrion/VibeVoice-ComfyUI.git \
+    && cd VibeVoice-ComfyUI \
+    && if [ -f requirements.txt ]; then \
+         grep -v -i -E '^(torch==|torch>=|torchvision|torchaudio|nvidia)' requirements.txt > /tmp/vv_reqs.txt \
+         && uv pip install -r /tmp/vv_reqs.txt && rm /tmp/vv_reqs.txt; \
+       fi \
+    && echo "=== VibeVoice-ComfyUI installed ==="
+
+RUN cd /comfyui/custom_nodes \
+    && git clone --recursive https://github.com/DualOrion/TTS-Audio-Suite.git \
+    && cd TTS-Audio-Suite \
+    && if [ -f requirements.txt ]; then \
+         grep -v -i -E '^(torch==|torch>=|torchvision|torchaudio|nvidia)' requirements.txt > /tmp/tts_reqs.txt \
+         && uv pip install -r /tmp/tts_reqs.txt && rm /tmp/tts_reqs.txt; \
+       fi \
+    && echo "=== TTS-Audio-Suite installed ==="
 
 WORKDIR /
 
@@ -177,6 +186,8 @@ from packaging.version import Version; \
 assert Version(transformers.__version__) >= Version('4.51.3'), f'transformers {transformers.__version__} < 4.51.3 (VibeVoice requires >=4.51.3)'; \
 assert os.path.isdir('/comfyui/custom_nodes/ComfyUI-VideoHelperSuite'), 'VHS not installed — VHS_LoadAudio will fail'; \
 assert os.path.isfile('/comfyui/custom_nodes/ComfyUI-VideoHelperSuite/__init__.py'), 'VHS __init__.py missing'; \
+assert os.path.isdir('/comfyui/custom_nodes/VibeVoice-ComfyUI'), 'VibeVoice-ComfyUI not baked — txt-voice will fail'; \
+assert os.path.isdir('/comfyui/custom_nodes/TTS-Audio-Suite'), 'TTS-Audio-Suite not baked — txt-voice will fail'; \
 print(f'torch={torch.__version__}, numpy={numpy.__version__}, transformers={transformers.__version__}'); \
 print('=== Audio endpoint environment verified ===')"
 

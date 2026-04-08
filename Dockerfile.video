@@ -64,6 +64,7 @@ COPY extra_model_paths.yaml ./
 #   CM_IntToFloat → comfymath
 #   easy cleanGpuUsed, easy clearCacheAll → comfyui-easy-use (VRAM cleanup mid-pipeline)
 #   LTXVFirstLastFrameControl_TTP → Comfyui_TTP_Toolset (git clone, patched for 0.18.2)
+#   Frames Slice → RES4LYF (git clone, was NV-only — now baked)
 RUN comfy node install comfyui-ltxvideo || true && \
     comfy node install comfyui-videohelpersuite || true && \
     comfy node install comfyui-kjnodes || true && \
@@ -81,6 +82,17 @@ RUN cd /comfyui/custom_nodes && \
     python /tmp/patch_ttp_toolset.py /comfyui/custom_nodes/Comfyui_TTP_Toolset/LTXVFirstLastFrameControl_TTP.py && \
     rm /tmp/patch_ttp_toolset.py && \
     echo "=== TTP Toolset installed and patched ==="
+
+# RES4LYF — git clone + install deps (was NV-only, now baked)
+RUN cd /comfyui/custom_nodes && \
+    git clone https://github.com/ClownsharkBatwing/RES4LYF.git && \
+    cd RES4LYF && \
+    if [ -f requirements.txt ]; then \
+        grep -v -i -E '^(torch==|torch>=|torchvision|torchaudio|nvidia)' requirements.txt > /tmp/res4lyf_reqs.txt && \
+        uv pip install -r /tmp/res4lyf_reqs.txt && \
+        rm /tmp/res4lyf_reqs.txt; \
+    fi && \
+    echo "=== RES4LYF installed ==="
 
 WORKDIR /
 
@@ -150,6 +162,10 @@ RUN test -d /comfyui/custom_nodes/Comfyui_TTP_Toolset && \
     test -f /comfyui/custom_nodes/Comfyui_TTP_Toolset/__init__.py && \
     grep -q "LTXVFirstLastFrameControl_TTP" /comfyui/custom_nodes/Comfyui_TTP_Toolset/__init__.py && \
     echo "=== TTP Toolset custom node verified ==="
+
+RUN test -d /comfyui/custom_nodes/RES4LYF && \
+    test -f /comfyui/custom_nodes/RES4LYF/__init__.py && \
+    echo "=== RES4LYF custom node verified ==="
 
 # ── Handler ──────────────────────────────────────────────────
 RUN uv pip install runpod requests websocket-client boto3

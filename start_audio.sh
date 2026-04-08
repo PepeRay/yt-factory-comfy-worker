@@ -3,11 +3,7 @@ set -e
 
 echo "=== YouTube Factory — Audio Endpoint ==="
 
-# Only audio-related nodes from Network Volume
-WHITELIST_NODES=(
-    "VibeVoice-ComfyUI"
-    "TTS-Audio-Suite"
-)
+# Custom nodes are baked in Docker image — no NV symlinks needed
 
 if [ -d "/runpod-volume/ComfyUI" ]; then
     echo "Network Volume detected"
@@ -34,25 +30,6 @@ if [ -d "/runpod-volume/ComfyUI" ]; then
             fname=$(basename "$f")
             if [ ! -e "/comfyui/input/$fname" ]; then
                 ln -sf "$f" "/comfyui/input/$fname"
-            fi
-        done
-    fi
-
-    # Whitelist audio nodes only
-    if [ -d "/runpod-volume/ComfyUI/custom_nodes" ]; then
-        echo "Linking whitelisted audio nodes..."
-        for node_name in "${WHITELIST_NODES[@]}"; do
-            node_dir="/runpod-volume/ComfyUI/custom_nodes/$node_name"
-            if [ -d "$node_dir" ]; then
-                if [ -d "/comfyui/custom_nodes/$node_name" ] && [ ! -L "/comfyui/custom_nodes/$node_name" ]; then
-                    rm -rf "/comfyui/custom_nodes/$node_name"
-                fi
-                if [ ! -e "/comfyui/custom_nodes/$node_name" ]; then
-                    ln -sf "$node_dir" "/comfyui/custom_nodes/$node_name"
-                    echo "  ✓ Linked: $node_name"
-                fi
-            else
-                echo "  ✗ Not found: $node_name"
             fi
         done
     fi
