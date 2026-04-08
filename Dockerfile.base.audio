@@ -182,12 +182,16 @@ RUN uv pip install --no-cache-dir runpod requests websocket-client boto3
 RUN uv pip install --no-cache-dir "huggingface_hub[cli]"
 
 # ── Model directory structure ───────────────────────────────
-RUN mkdir -p /comfyui/models/{vibevoice,TTS,stt,audio_encoders,model_patches}
+RUN mkdir -p /comfyui/models/{TTS,stt,audio_encoders,model_patches}
 
 # ── Download models (HEAVY — cached in base image) ─────────
-# VibeVoice-Large (~18.5 GB)
-RUN huggingface-cli download microsoft/VibeVoice-Large \
-    --local-dir /comfyui/models/vibevoice/VibeVoice-Large
+# Qwen3-TTS 1.7B (~4.5 GB)
+RUN huggingface-cli download Qwen/Qwen3-TTS-12Hz-1.7B \
+    --local-dir /comfyui/models/TTS/Qwen3-TTS-1.7B
+
+# CosyVoice 3 0.5B (~9.75 GB)
+RUN huggingface-cli download FunAudioLLM/Fun-CosyVoice3-0.5B-2512 \
+    --local-dir /comfyui/models/TTS/CosyVoice3
 
 # Whisper large-v3 (~3 GB)
 RUN huggingface-cli download openai/whisper-large-v3 \
@@ -211,19 +215,21 @@ import transformers; \
 import pydantic; \
 import blake3; \
 from packaging.version import Version; \
-assert Version(transformers.__version__) >= Version('4.51.3'), f'transformers {transformers.__version__} < 4.51.3 (VibeVoice requires >=4.51.3)'; \
+assert Version(transformers.__version__) >= Version('4.51.3'), f'transformers {transformers.__version__} < 4.51.3'; \
 assert os.path.isdir('/comfyui/custom_nodes/ComfyUI-VideoHelperSuite'), 'VHS not installed — VHS_LoadAudio will fail'; \
 assert os.path.isfile('/comfyui/custom_nodes/ComfyUI-VideoHelperSuite/__init__.py'), 'VHS __init__.py missing'; \
 assert os.path.isdir('/comfyui/custom_nodes/VibeVoice-ComfyUI'), 'VibeVoice-ComfyUI not baked — txt-voice will fail'; \
 assert os.path.isdir('/comfyui/custom_nodes/TTS-Audio-Suite'), 'TTS-Audio-Suite not baked — txt-voice will fail'; \
-assert os.path.isdir('/comfyui/models/vibevoice/VibeVoice-Large'), 'VibeVoice-Large model not downloaded'; \
+assert os.path.isdir('/comfyui/models/TTS/Qwen3-TTS-1.7B'), 'Qwen3-TTS-1.7B model not downloaded'; \
+assert os.path.isdir('/comfyui/models/TTS/CosyVoice3'), 'CosyVoice3 model not downloaded'; \
 assert os.path.isdir('/comfyui/models/stt/whisper/large-v3'), 'Whisper large-v3 model not downloaded'; \
 print(f'torch={torch.__version__}, numpy={numpy.__version__}, transformers={transformers.__version__}'); \
-print('=== VibeVoice-Large model verified ==='); \
+print('=== Qwen3-TTS-1.7B model verified ==='); \
+print('=== CosyVoice3 model verified ==='); \
 print('=== Whisper large-v3 model verified ==='); \
 print('=== Audio base image environment verified ===')"
 
 ENV RUNPOD_NETWORK_VOLUME_PATH="/runpod-volume"
 
-LABEL description="YT Factory Audio base — ComfyUI + models + deps"
-LABEL version="v1"
+LABEL description="YT Factory Audio base — ComfyUI + Qwen3-TTS + CosyVoice3 + Whisper + deps"
+LABEL version="v2"
