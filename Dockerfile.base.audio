@@ -238,5 +238,14 @@ ENV HF_TOKEN=
 
 ENV RUNPOD_NETWORK_VOLUME_PATH="/runpod-volume"
 
-LABEL description="YT Factory Audio base — ComfyUI + Qwen3-TTS + CosyVoice3 + Whisper + deps"
+# ── Handler code ──────────────────────────────────────────────
+COPY r2_helper.py /r2_helper.py
+COPY download_r2_inputs.py /download_r2_inputs.py
+COPY handler_audio.py /handler.py
+COPY start_audio.sh /start.sh
+RUN chmod +x /start.sh
+
+CMD ["/start.sh"]
+
+LABEL description="YT Factory Audio — ComfyUI + Qwen3-TTS + CosyVoice3 + Whisper (NV-free)"
 LABEL version="v2"

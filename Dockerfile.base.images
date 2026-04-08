@@ -162,10 +162,13 @@ ENV HF_TOKEN=
 
 ENV RUNPOD_NETWORK_VOLUME_PATH="/runpod-volume"
 
-# ── Labels ──────────────────────────────────────────────────
-LABEL maintainer="Raymundo Olivares"
-LABEL project="yt-factory"
-LABEL endpoint="images"
-LABEL type="base"
-LABEL description="Heavy base image with ComfyUI + custom nodes + all models for Images endpoint"
-LABEL models="flux-2-klein-9b-Q8_0.gguf, flux-2-klein-9b-fp8.safetensors, flux2-vae.safetensors, qwen_3_8b_fp8mixed_abliterated.safetensors"
+# ── Handler code ──────────────────────────────────────────────
+COPY r2_helper.py /r2_helper.py
+COPY download_r2_inputs.py /download_r2_inputs.py
+COPY handler_images.py /handler.py
+COPY start_images.sh /start.sh
+RUN chmod +x /start.sh
+
+CMD ["/start.sh"]
+
+LABEL description="YT Factory Images — ComfyUI + Flux Klein + models (NV-free)"
