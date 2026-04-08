@@ -79,7 +79,7 @@ RUN cd /comfyui/custom_nodes \
 RUN cd /comfyui/custom_nodes \
     && for attempt in 1 2 3; do \
          echo "=== VibeVoice clone attempt $attempt/3 ===" \
-         && git clone --depth 1 --recursive https://github.com/DualOrion/VibeVoice-ComfyUI.git \
+         && git clone --depth 1 --recursive https://github.com/Enemyx-net/VibeVoice-ComfyUI.git \
          && break \
          || { echo "WARN: VibeVoice clone attempt $attempt failed"; [ $attempt -lt 3 ] && sleep 5; }; \
        done \
@@ -94,7 +94,7 @@ RUN cd /comfyui/custom_nodes \
 RUN cd /comfyui/custom_nodes \
     && for attempt in 1 2 3; do \
          echo "=== TTS-Audio-Suite clone attempt $attempt/3 ===" \
-         && git clone --depth 1 --recursive https://github.com/DualOrion/TTS-Audio-Suite.git \
+         && git clone --depth 1 --recursive https://github.com/diodiogod/TTS-Audio-Suite.git \
          && break \
          || { echo "WARN: TTS-Audio-Suite clone attempt $attempt failed"; [ $attempt -lt 3 ] && sleep 5; }; \
        done \

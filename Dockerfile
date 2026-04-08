@@ -89,11 +89,11 @@ RUN cd custom_nodes \
     && git clone https://github.com/yolain/ComfyUI-Easy-Use.git \
     && (cd ComfyUI-Easy-Use && pip install -r requirements.txt 2>/dev/null || true) \
     ; cd /comfyui/custom_nodes \
-    && (git clone https://github.com/DualOrion/VibeVoice-ComfyUI.git \
+    && (git clone https://github.com/Enemyx-net/VibeVoice-ComfyUI.git \
         && cd VibeVoice-ComfyUI && pip install -r requirements.txt 2>/dev/null \
         || echo "WARN: VibeVoice clone failed — will link from Network Volume") \
     ; cd /comfyui/custom_nodes \
-    && (git clone https://github.com/DualOrion/TTS-Audio-Suite.git \
+    && (git clone https://github.com/diodiogod/TTS-Audio-Suite.git \
         && cd TTS-Audio-Suite && pip install -r requirements.txt 2>/dev/null \
         || echo "WARN: TTS-Audio-Suite clone failed — will link from Network Volume") \
     ; cd /comfyui/custom_nodes \
