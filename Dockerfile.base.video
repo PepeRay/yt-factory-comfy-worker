@@ -50,17 +50,17 @@ RUN grep -v -i -E '^(torch==|torch>=|torch<=|torchvision==|torchvision>=|torchau
     rm /tmp/reqs_no_torch.txt
 
 # ── Custom Nodes: VIDEO ONLY ────────────────────────────────
-# What test_v2_img-vid workflow uses:
-#   LTXV* nodes → comfyui-ltxvideo
+# Nodes used by Wan 2.2 ULTRA workflow and shared utilities:
+#   UnetLoaderGGUF, DualCLIPLoaderGGUF → comfyui-gguf
 #   VHS_VideoCombine → comfyui-videohelpersuite
 #   VAELoaderKJ, ResizeImagesByLongerEdge, ImageResizeKJv2 → comfyui-kjnodes
 #   MathExpression|pysssss → comfyui-custom-scripts
-#   UnetLoaderGGUF → comfyui-gguf (WAS MISSING — FIXED)
-#   Power Lora Loader, Any Switch → rgthree-comfy (WAS MISSING — FIXED)
+#   Power Lora Loader, Any Switch → rgthree-comfy
 #   CM_IntToFloat → comfymath
 #   easy cleanGpuUsed, easy clearCacheAll → comfyui-easy-use (VRAM cleanup mid-pipeline)
-#   LTXVFirstLastFrameControl_TTP → Comfyui_TTP_Toolset (git clone, patched for 0.18.2)
-#   Frames Slice → RES4LYF (git clone, was NV-only — now baked)
+#   LTXVFirstLastFrameControl_TTP → Comfyui_TTP_Toolset (kept for compatibility)
+#   Frames Slice → RES4LYF
+#   comfyui-ltxvideo kept for potential future use
 RUN comfy node install comfyui-ltxvideo || true && \
     comfy node install comfyui-videohelpersuite || true && \
     comfy node install comfyui-kjnodes || true && \
@@ -145,41 +145,37 @@ RUN uv pip install runpod requests websocket-client boto3
 # ── Model directory structure ───────────────────────────────
 RUN mkdir -p /comfyui/models/{diffusion_models,vae,clip,loras,text_encoders,unet,checkpoints,controlnet,upscale_models,latent_upscale_models,embeddings}
 
-# ── Download models (HEAVY — cached in base image) ─────────
+# ── Download Wan 2.2 models (HEAVY — cached in base image) ──
 # Each model is its own RUN layer for Docker cache efficiency.
 # If one download fails, previously cached layers are preserved.
 
-# LTX 2.3 22B GGUF (~22.8 GB)
-RUN wget -q --show-progress -O /comfyui/models/diffusion_models/ltx-2.3-22b-dev-Q8_0.gguf \
-    "https://huggingface.co/unsloth/LTX-2.3-GGUF/resolve/main/ltx-2.3-22b-dev-Q8_0.gguf"
+# Wan 2.2 I2V HighNoise UNET GGUF (~15.4 GB)
+RUN wget -q --show-progress -O /comfyui/models/diffusion_models/Wan2.2-I2V-A14B-HighNoise-Q8_0.gguf \
+    "https://huggingface.co/QuantStack/Wan2.2-I2V-A14B-GGUF/resolve/main/HighNoise/Wan2.2-I2V-A14B-HighNoise-Q8_0.gguf"
 
-# LTX23 Video VAE (~1.45 GB)
-RUN wget -q --show-progress -O /comfyui/models/vae/LTX23_video_vae_bf16.safetensors \
-    "https://huggingface.co/Kijai/LTX2.3_comfy/resolve/main/vae/LTX23_video_vae_bf16.safetensors"
+# Wan 2.2 I2V LowNoise UNET GGUF (~15.4 GB)
+RUN wget -q --show-progress -O /comfyui/models/diffusion_models/Wan2.2-I2V-A14B-LowNoise-Q8_0.gguf \
+    "https://huggingface.co/QuantStack/Wan2.2-I2V-A14B-GGUF/resolve/main/LowNoise/Wan2.2-I2V-A14B-LowNoise-Q8_0.gguf"
 
-# LTX23 Audio VAE (~365 MB)
-RUN wget -q --show-progress -O /comfyui/models/vae/LTX23_audio_vae_bf16.safetensors \
-    "https://huggingface.co/Kijai/LTX2.3_comfy/resolve/main/vae/LTX23_audio_vae_bf16.safetensors"
+# UMT5-XXL text encoder GGUF (~4.05 GB)
+RUN wget -q --show-progress -O /comfyui/models/clip/umt5-xxl-encoder-Q5_K_S.gguf \
+    "https://huggingface.co/city96/umt5-xxl-encoder-gguf/resolve/main/umt5-xxl-encoder-Q5_K_S.gguf"
 
-# Spatial Upscaler (~996 MB)
-RUN wget -q --show-progress -O /comfyui/models/upscale_models/ltx-2.3-spatial-upscaler-x2-1.0.safetensors \
-    "https://huggingface.co/Lightricks/LTX-2.3/resolve/main/ltx-2.3-spatial-upscaler-x2-1.0.safetensors"
+# Wan 2.1 VAE (~254 MB — shared between Wan 2.1 and 2.2)
+RUN wget -q --show-progress -O /comfyui/models/vae/wan_2.1_vae.safetensors \
+    "https://huggingface.co/Comfy-Org/Wan_2.1_ComfyUI_repackaged/resolve/main/split_files/vae/wan_2.1_vae.safetensors"
 
-# Gemma 3 12B text encoder (~6.5 GB)
-RUN wget -q --show-progress -O /comfyui/models/text_encoders/gemma_3_12B_it_fp4_mixed.safetensors \
-    "https://huggingface.co/Comfy-Org/ltx-2/resolve/main/split_files/text_encoders/gemma_3_12B_it_fp4_mixed.safetensors"
+# Wan 2.2 Lightning I2V LoRA HIGH (~614 MB)
+RUN wget -q --show-progress -O /comfyui/models/loras/Wan2.2-Lightning_I2V-A14B-4steps-lora_HIGH_fp16.safetensors \
+    "https://huggingface.co/Kijai/WanVideo_comfy/resolve/main/LoRAs/Wan22-Lightning/old/Wan2.2-Lightning_I2V-A14B-4steps-lora_HIGH_fp16.safetensors"
 
-# LTX 2.3 Text Projection (~2.31 GB)
-RUN wget -q --show-progress -O /comfyui/models/text_encoders/ltx-2.3_text_projection_bf16.safetensors \
-    "https://huggingface.co/Kijai/LTX2.3_comfy/resolve/main/text_encoders/ltx-2.3_text_projection_bf16.safetensors"
+# Wan 2.2 Lightning I2V LoRA LOW (~614 MB)
+RUN wget -q --show-progress -O /comfyui/models/loras/Wan2.2-Lightning_I2V-A14B-4steps-lora_LOW_fp16.safetensors \
+    "https://huggingface.co/Kijai/WanVideo_comfy/resolve/main/LoRAs/Wan22-Lightning/old/Wan2.2-Lightning_I2V-A14B-4steps-lora_LOW_fp16.safetensors"
 
-# Distilled LoRA (~7.61 GB)
-RUN wget -q --show-progress -O /comfyui/models/loras/ltx-2.3-22b-distilled-lora-384.safetensors \
-    "https://huggingface.co/Lightricks/LTX-2.3/resolve/main/ltx-2.3-22b-distilled-lora-384.safetensors"
-
-# IC-LoRA Detailer (~2.62 GB)
-RUN wget -q --show-progress -O /comfyui/models/loras/ltx-2-19b-ic-lora-detailer.safetensors \
-    "https://huggingface.co/Lightricks/LTX-2-19b-IC-LoRA-Detailer/resolve/main/ltx-2-19b-ic-lora-detailer.safetensors"
+# 4x ClearReality V1 upscaler (~9 MB)
+RUN wget -q --show-progress -O /comfyui/models/upscale_models/4x-ClearRealityV1.pth \
+    "https://huggingface.co/Kim2091/ClearRealityV1/resolve/main/4x-ClearRealityV1.pth"
 
 # ── Verify environment (build-time gate) ────────────────────
 # If any import fails, the build fails — no broken images pushed.
@@ -219,19 +215,18 @@ RUN test -d /comfyui/custom_nodes/RES4LYF && \
     test -f /comfyui/custom_nodes/RES4LYF/__init__.py && \
     echo "=== RES4LYF custom node verified ==="
 
-# ── Verify models (build-time gate) ─────────────────────────
+# ── Verify Wan 2.2 models (build-time gate) ─────────────────
 # Each model file must exist and have non-zero size.
 RUN python -c "\
 import os; \
 models = { \
-    'diffusion_models/ltx-2.3-22b-dev-Q8_0.gguf': 22.8, \
-    'vae/LTX23_video_vae_bf16.safetensors': 1.0, \
-    'vae/LTX23_audio_vae_bf16.safetensors': 0.3, \
-    'upscale_models/ltx-2.3-spatial-upscaler-x2-1.0.safetensors': 0.9, \
-    'text_encoders/gemma_3_12B_it_fp4_mixed.safetensors': 6.0, \
-    'text_encoders/ltx-2.3_text_projection_bf16.safetensors': 2.0, \
-    'loras/ltx-2.3-22b-distilled-lora-384.safetensors': 7.0, \
-    'loras/ltx-2-19b-ic-lora-detailer.safetensors': 2.0, \
+    'diffusion_models/Wan2.2-I2V-A14B-HighNoise-Q8_0.gguf': 14.0, \
+    'diffusion_models/Wan2.2-I2V-A14B-LowNoise-Q8_0.gguf': 14.0, \
+    'clip/umt5-xxl-encoder-Q5_K_S.gguf': 3.5, \
+    'vae/wan_2.1_vae.safetensors': 0.2, \
+    'loras/Wan2.2-Lightning_I2V-A14B-4steps-lora_HIGH_fp16.safetensors': 0.5, \
+    'loras/Wan2.2-Lightning_I2V-A14B-4steps-lora_LOW_fp16.safetensors': 0.5, \
+    'upscale_models/4x-ClearRealityV1.pth': 0.008, \
 }; \
 for path, min_gb in models.items(): \
     full = f'/comfyui/models/{path}'; \
@@ -239,9 +234,9 @@ for path, min_gb in models.items(): \
     size_gb = os.path.getsize(full) / (1024**3); \
     assert size_gb >= min_gb, f'{full} too small: {size_gb:.2f} GB (expected >= {min_gb} GB)'; \
     print(f'  OK: {path} ({size_gb:.2f} GB)'); \
-print('=== All 8 models verified ===')"
+print('=== All 7 Wan 2.2 models verified ===')"
 
 ENV RUNPOD_NETWORK_VOLUME_PATH="/runpod-volume"
 
-LABEL description="YT Factory Video base — ComfyUI + LTX 2.3 models + deps (~44 GB)"
-LABEL version="v1"
+LABEL description="YT Factory Video base — ComfyUI + Wan 2.2 I2V models + deps (~36 GB)"
+LABEL version="v2"
