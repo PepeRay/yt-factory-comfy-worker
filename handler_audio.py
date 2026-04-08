@@ -432,6 +432,13 @@ def handler(job):
         "content_id": content_id,
         "output_dir": dest,
         "outputs": results,
+        "r2_debug": {
+            "r2_enabled": R2_ENABLED,
+            "env_endpoint": bool(os.environ.get("R2_ENDPOINT")),
+            "env_access_key": bool(os.environ.get("R2_ACCESS_KEY_ID")),
+            "env_secret_key": bool(os.environ.get("R2_SECRET_ACCESS_KEY")),
+            "env_bucket": bool(os.environ.get("R2_BUCKET")),
+        },
     }
 
 
