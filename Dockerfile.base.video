@@ -72,16 +72,30 @@ RUN comfy node install comfyui-ltxvideo || true && \
 
 # TTP Toolset — git clone + patch for ComfyUI 0.18.2 compatibility
 # Original uses comfy_api (requires ComfyUI >= 0.3.x), patch converts to traditional format
+# Retry logic: GitHub Actions runners sometimes hit transient network issues
 COPY patch_ttp_toolset.py /tmp/patch_ttp_toolset.py
 RUN cd /comfyui/custom_nodes && \
-    git clone https://github.com/TTPlanetPig/Comfyui_TTP_Toolset.git && \
+    for attempt in 1 2 3; do \
+      echo "=== TTP Toolset clone attempt $attempt/3 ===" && \
+      git clone --depth 1 https://github.com/TTPlanetPig/Comfyui_TTP_Toolset.git && \
+      break || \
+      { echo "WARN: TTP Toolset clone attempt $attempt failed"; [ $attempt -lt 3 ] && sleep 5; }; \
+    done && \
+    test -d Comfyui_TTP_Toolset && \
     python /tmp/patch_ttp_toolset.py /comfyui/custom_nodes/Comfyui_TTP_Toolset/LTXVFirstLastFrameControl_TTP.py && \
     rm /tmp/patch_ttp_toolset.py && \
     echo "=== TTP Toolset installed and patched ==="
 
 # RES4LYF — git clone + install deps (was NV-only, now baked)
+# Retry logic for CI/CD resilience
 RUN cd /comfyui/custom_nodes && \
-    git clone https://github.com/ClownsharkBatwing/RES4LYF.git && \
+    for attempt in 1 2 3; do \
+      echo "=== RES4LYF clone attempt $attempt/3 ===" && \
+      git clone --depth 1 https://github.com/ClownsharkBatwing/RES4LYF.git && \
+      break || \
+      { echo "WARN: RES4LYF clone attempt $attempt failed"; [ $attempt -lt 3 ] && sleep 5; }; \
+    done && \
+    test -d RES4LYF && \
     cd RES4LYF && \
     if [ -f requirements.txt ]; then \
         grep -v -i -E '^(torch==|torch>=|torchvision|torchaudio|nvidia)' requirements.txt > /tmp/res4lyf_reqs.txt && \

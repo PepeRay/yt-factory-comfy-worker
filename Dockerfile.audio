@@ -74,8 +74,16 @@ RUN cd /comfyui/custom_nodes \
     && echo "=== VHS installed via git clone ==="
 
 # VibeVoice + TTS-Audio-Suite — baked in image (no NV fallback)
+# Retry logic: GitHub Actions runners sometimes hit transient network issues
+# cloning from GitHub. Shallow clone (--depth 1) reduces payload size.
 RUN cd /comfyui/custom_nodes \
-    && git clone --recursive https://github.com/DualOrion/VibeVoice-ComfyUI.git \
+    && for attempt in 1 2 3; do \
+         echo "=== VibeVoice clone attempt $attempt/3 ===" \
+         && git clone --depth 1 --recursive https://github.com/DualOrion/VibeVoice-ComfyUI.git \
+         && break \
+         || { echo "WARN: VibeVoice clone attempt $attempt failed"; [ $attempt -lt 3 ] && sleep 5; }; \
+       done \
+    && test -d VibeVoice-ComfyUI \
     && cd VibeVoice-ComfyUI \
     && if [ -f requirements.txt ]; then \
          grep -v -i -E '^(torch==|torch>=|torchvision|torchaudio|nvidia)' requirements.txt > /tmp/vv_reqs.txt \
@@ -84,7 +92,13 @@ RUN cd /comfyui/custom_nodes \
     && echo "=== VibeVoice-ComfyUI installed ==="
 
 RUN cd /comfyui/custom_nodes \
-    && git clone --recursive https://github.com/DualOrion/TTS-Audio-Suite.git \
+    && for attempt in 1 2 3; do \
+         echo "=== TTS-Audio-Suite clone attempt $attempt/3 ===" \
+         && git clone --depth 1 --recursive https://github.com/DualOrion/TTS-Audio-Suite.git \
+         && break \
+         || { echo "WARN: TTS-Audio-Suite clone attempt $attempt failed"; [ $attempt -lt 3 ] && sleep 5; }; \
+       done \
+    && test -d TTS-Audio-Suite \
     && cd TTS-Audio-Suite \
     && if [ -f requirements.txt ]; then \
          grep -v -i -E '^(torch==|torch>=|torchvision|torchaudio|nvidia)' requirements.txt > /tmp/tts_reqs.txt \
