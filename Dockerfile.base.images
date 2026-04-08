@@ -10,6 +10,8 @@ ARG BASE_IMAGE=nvidia/cuda:12.6.3-cudnn-runtime-ubuntu24.04
 FROM ${BASE_IMAGE} AS base
 
 ARG COMFYUI_VERSION=0.18.2
+ARG HF_TOKEN
+ENV HF_TOKEN=${HF_TOKEN}
 
 ENV DEBIAN_FRONTEND=noninteractive
 ENV PIP_PREFER_BINARY=1
@@ -106,6 +108,7 @@ RUN wget -q --show-progress -O /comfyui/models/diffusion_models/flux-2-klein-9b-
 
 # Flux 2 Klein fp8 (~9.4 GB)
 RUN wget -q --show-progress -O /comfyui/models/diffusion_models/flux-2-klein-9b-fp8.safetensors \
+    --header="Authorization: Bearer ${HF_TOKEN}" \
     "https://huggingface.co/black-forest-labs/FLUX.2-klein-9b-fp8/resolve/main/flux-2-klein-9b-fp8.safetensors"
 
 # Flux 2 VAE (~336 MB)
@@ -153,6 +156,9 @@ RUN echo "=== Verifying model files ===" && \
     test -f /comfyui/models/clip/qwen_3_8b_fp8mixed_abliterated.safetensors && \
     echo "=== All core models verified ===" || \
     (echo "ERROR: Missing model files!" && exit 1)
+
+# ── Clear HF token (don't bake into final image) ──────────
+ENV HF_TOKEN=
 
 ENV RUNPOD_NETWORK_VOLUME_PATH="/runpod-volume"
 

@@ -8,6 +8,8 @@ ARG BASE_IMAGE=nvidia/cuda:12.6.3-cudnn-runtime-ubuntu24.04
 FROM ${BASE_IMAGE} AS base
 
 ARG COMFYUI_VERSION=0.18.2
+ARG HF_TOKEN
+ENV HF_TOKEN=${HF_TOKEN}
 
 ENV DEBIAN_FRONTEND=noninteractive
 ENV PIP_PREFER_BINARY=1
@@ -187,11 +189,13 @@ RUN mkdir -p /comfyui/models/{TTS,stt,audio_encoders,model_patches}
 # ── Download models (HEAVY — cached in base image) ─────────
 # Qwen3-TTS 1.7B (~4.5 GB)
 RUN huggingface-cli download Qwen/Qwen3-TTS-12Hz-1.7B \
-    --local-dir /comfyui/models/TTS/Qwen3-TTS-1.7B
+    --local-dir /comfyui/models/TTS/Qwen3-TTS-1.7B \
+    --token $HF_TOKEN
 
 # CosyVoice 3 0.5B (~9.75 GB)
 RUN huggingface-cli download FunAudioLLM/Fun-CosyVoice3-0.5B-2512 \
-    --local-dir /comfyui/models/TTS/CosyVoice3
+    --local-dir /comfyui/models/TTS/CosyVoice3 \
+    --token $HF_TOKEN
 
 # Whisper large-v3 (~3 GB)
 RUN huggingface-cli download openai/whisper-large-v3 \
@@ -228,6 +232,9 @@ print('=== Qwen3-TTS-1.7B model verified ==='); \
 print('=== CosyVoice3 model verified ==='); \
 print('=== Whisper large-v3 model verified ==='); \
 print('=== Audio base image environment verified ===')"
+
+# ── Clear HF token (don't bake into final image) ──────────
+ENV HF_TOKEN=
 
 ENV RUNPOD_NETWORK_VOLUME_PATH="/runpod-volume"
 

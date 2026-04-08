@@ -8,6 +8,8 @@ ARG BASE_IMAGE=nvidia/cuda:12.6.3-cudnn-runtime-ubuntu24.04
 FROM ${BASE_IMAGE} AS base
 
 ARG COMFYUI_VERSION=0.18.2
+ARG HF_TOKEN
+ENV HF_TOKEN=${HF_TOKEN}
 
 ENV DEBIAN_FRONTEND=noninteractive
 ENV PIP_PREFER_BINARY=1
@@ -235,6 +237,9 @@ for path, min_gb in models.items(): \
     assert size_gb >= min_gb, f'{full} too small: {size_gb:.2f} GB (expected >= {min_gb} GB)'; \
     print(f'  OK: {path} ({size_gb:.2f} GB)'); \
 print('=== All 7 Wan 2.2 models verified ===')"
+
+# ── Clear HF token (don't bake into final image) ──────────
+ENV HF_TOKEN=
 
 ENV RUNPOD_NETWORK_VOLUME_PATH="/runpod-volume"
 

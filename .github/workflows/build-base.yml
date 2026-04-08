@@ -60,6 +60,10 @@ jobs:
           tags: |
             ${{ env.BASE_PREFIX }}-${{ inputs.target }}-base:v1
             ${{ env.BASE_PREFIX }}-${{ inputs.target }}-base:latest
+          build-args: |
+            HF_TOKEN=${{ secrets.HF_TOKEN }}
+          secrets: |
+            HF_TOKEN=${{ secrets.HF_TOKEN }}
           cache-from: type=gha,scope=base-${{ inputs.target }}
           cache-to: type=gha,mode=max,scope=base-${{ inputs.target }}
 
