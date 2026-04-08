@@ -30,19 +30,19 @@ jobs:
         with:
           filters: |
             audio:
-              - 'Dockerfile.audio'
+              - 'Dockerfile.audio.slim'
               - 'handler_audio.py'
               - 'start_audio.sh'
             images:
-              - 'Dockerfile.images'
+              - 'Dockerfile.images.slim'
               - 'handler_images.py'
               - 'start_images.sh'
             video:
-              - 'Dockerfile.video'
+              - 'Dockerfile.video.slim'
               - 'handler_video.py'
               - 'start_video.sh'
             shared:
-              - 'extra_model_paths.yaml'
+              - 'r2_helper.py'
 
   build-audio:
     needs: changes
@@ -69,7 +69,7 @@ jobs:
       - uses: docker/build-push-action@v6
         with:
           context: .
-          file: Dockerfile.audio
+          file: Dockerfile.audio.slim
           push: true
           tags: |
             ${{ env.IMAGE_PREFIX }}-audio:latest
@@ -102,7 +102,7 @@ jobs:
       - uses: docker/build-push-action@v6
         with:
           context: .
-          file: Dockerfile.images
+          file: Dockerfile.images.slim
           push: true
           tags: |
             ${{ env.IMAGE_PREFIX }}-images:latest
@@ -135,7 +135,7 @@ jobs:
       - uses: docker/build-push-action@v6
         with:
           context: .
-          file: Dockerfile.video
+          file: Dockerfile.video.slim
           push: true
           tags: |
             ${{ env.IMAGE_PREFIX }}-video:latest
