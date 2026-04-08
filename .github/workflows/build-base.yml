@@ -1,0 +1,68 @@
+name: Build Base Images (with models)
+
+# Manual trigger only — base images rarely change
+on:
+  workflow_dispatch:
+    inputs:
+      target:
+        description: 'Which base image to build (audio, images, video)'
+        required: true
+        type: choice
+        options:
+          - audio
+          - images
+          - video
+
+env:
+  REGISTRY: ghcr.io
+  BASE_PREFIX: ghcr.io/peperay/yt-factory
+
+jobs:
+  build-base:
+    runs-on: ubuntu-latest
+    timeout-minutes: 180
+    permissions:
+      contents: read
+      packages: write
+
+    steps:
+      - uses: actions/checkout@v4
+
+      # Free ~31GB of disk space (pre-installed tools we don't need)
+      - name: Free disk space
+        uses: jlumbroso/free-disk-space@main
+        with:
+          tool-cache: true
+          android: true
+          dotnet: true
+          haskell: true
+          large-packages: true
+          docker-images: true
+          swap-storage: true
+
+      - name: Show available disk space
+        run: df -h / && echo "---" && df -h /mnt
+
+      - uses: docker/login-action@v3
+        with:
+          registry: ghcr.io
+          username: ${{ github.actor }}
+          password: ${{ secrets.GITHUB_TOKEN }}
+
+      - uses: docker/setup-buildx-action@v3
+
+      - name: Build & push base image
+        uses: docker/build-push-action@v6
+        with:
+          context: .
+          file: Dockerfile.base.${{ inputs.target }}
+          push: true
+          tags: |
+            ${{ env.BASE_PREFIX }}-${{ inputs.target }}-base:v1
+            ${{ env.BASE_PREFIX }}-${{ inputs.target }}-base:latest
+          cache-from: type=gha,scope=base-${{ inputs.target }}
+          cache-to: type=gha,mode=max,scope=base-${{ inputs.target }}
+
+      - name: Show final disk usage
+        if: always()
+        run: df -h /
