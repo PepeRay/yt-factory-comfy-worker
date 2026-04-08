@@ -187,8 +187,8 @@ RUN uv pip install --no-cache-dir "huggingface_hub[cli]"
 RUN mkdir -p /comfyui/models/{TTS,stt,audio_encoders,model_patches}
 
 # ── Download models (HEAVY — cached in base image) ─────────
-# Qwen3-TTS 1.7B (~4.5 GB)
-RUN huggingface-cli download Qwen/Qwen3-TTS-12Hz-1.7B \
+# Qwen3-TTS 1.7B CustomVoice — for voice cloning (~4.5 GB)
+RUN huggingface-cli download Qwen/Qwen3-TTS-12Hz-1.7B-CustomVoice \
     --local-dir /comfyui/models/TTS/Qwen3-TTS-1.7B \
     --token $HF_TOKEN
 
