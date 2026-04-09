@@ -147,8 +147,10 @@ jobs:
           cache-to: type=gha,mode=max,scope=video
 
   update-runpod:
+    # DISABLED: RunPod templates now point to base images (built via build-base.yml)
+    # The CI/CD images here don't have models baked in. Don't overwrite the templates.
     needs: [build-audio, build-images, build-video]
-    if: always() && (needs.build-audio.result == 'success' || needs.build-images.result == 'success' || needs.build-video.result == 'success')
+    if: false
     runs-on: ubuntu-latest
     steps:
       - name: Update RunPod templates
