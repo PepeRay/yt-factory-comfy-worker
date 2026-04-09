@@ -248,12 +248,8 @@ def _compose_concat_audio(src, dest, content_id, channel=None, platform=None):
     chunks = []
     r2_temp_dir = None
 
-    # Try NV first
-    if os.path.isdir(audio_dir):
-        chunks = sorted(glob_module.glob(os.path.join(audio_dir, "chunk_*")))
-
-    # Fallback: download from R2
-    if not chunks and R2_ENABLED and channel:
+    # Always download ALL chunks from R2 first (NV-free: workers don't share filesystem)
+    if R2_ENABLED and channel:
         r2_prefix = f"{channel}/{content_id}/source/audio/"
         try:
             r2_keys = r2_helper.list_files(r2_prefix)
@@ -261,15 +257,18 @@ def _compose_concat_audio(src, dest, content_id, channel=None, platform=None):
                 [k for k in r2_keys if os.path.basename(k).startswith("chunk_")]
             )
             if chunk_keys:
-                r2_temp_dir = f"/tmp/r2_audio_{content_id}"
-                os.makedirs(r2_temp_dir, exist_ok=True)
+                os.makedirs(audio_dir, exist_ok=True)
                 for key in chunk_keys:
-                    local_path = os.path.join(r2_temp_dir, os.path.basename(key))
+                    local_path = os.path.join(audio_dir, os.path.basename(key))
                     r2_helper.download_file(key, local_path)
-                    chunks.append(local_path)
+                chunks = sorted(glob_module.glob(os.path.join(audio_dir, "chunk_*")))
                 print(f"[INFO] Downloaded {len(chunks)} audio chunks from R2")
         except Exception as e:
-            print(f"[WARN] R2 download failed: {e}")
+            print(f"[WARN] R2 chunk download failed: {e}")
+
+    # Fallback: check local filesystem (NV or previously downloaded)
+    if not chunks and os.path.isdir(audio_dir):
+        chunks = sorted(glob_module.glob(os.path.join(audio_dir, "chunk_*")))
 
     if not chunks:
         raise RuntimeError(
