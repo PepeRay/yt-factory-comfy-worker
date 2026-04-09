@@ -36,8 +36,31 @@ if [ -d "/runpod-volume/ComfyUI" ]; then
     fi
 else
     echo "INFO: No Network Volume — using baked models"
-    echo "No Network Volume — downloading inputs from R2..."
-    /opt/venv/bin/python /download_r2_inputs.py || echo "WARNING: R2 input download failed"
+    echo "Downloading R2 inputs to /comfyui/input/..."
+    mkdir -p /comfyui/input
+    /opt/venv/bin/python <<'PYEOF'
+import os, sys
+sys.path.insert(0, '/')
+try:
+    import r2_helper
+    keys = r2_helper.list_files("inputs/audio/")
+    print(f"Found {len(keys)} files in R2 under inputs/audio/")
+    for key in keys:
+        fname = os.path.basename(key)
+        if not fname:
+            continue
+        local_path = os.path.join("/comfyui/input", fname)
+        if not os.path.exists(local_path):
+            r2_helper.download_file(key, local_path)
+            print(f"  [OK] {fname}")
+        else:
+            print(f"  [SKIP] {fname} exists")
+    print("R2 input download complete")
+except Exception as e:
+    import traceback
+    print(f"ERROR: {e}")
+    traceback.print_exc()
+PYEOF
 fi
 
 mkdir -p /runpod-volume/jobs 2>/dev/null || true
