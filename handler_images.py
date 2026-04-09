@@ -319,6 +319,33 @@ def image_to_base64(image_path):
         return base64.b64encode(f.read()).decode("utf-8")
 
 
+_INPUTS_DOWNLOADED = False
+
+
+def _ensure_r2_inputs():
+    """Download all R2 input files to /comfyui/input/ on first job (NV-free mode)."""
+    global _INPUTS_DOWNLOADED
+    if _INPUTS_DOWNLOADED or not R2_ENABLED:
+        return
+    try:
+        input_dir = "/comfyui/input"
+        os.makedirs(input_dir, exist_ok=True)
+        keys = r2_helper.list_files("inputs/audio/")
+        downloaded = 0
+        for key in keys:
+            fname = os.path.basename(key)
+            if not fname:
+                continue
+            local_path = os.path.join(input_dir, fname)
+            if not os.path.exists(local_path):
+                r2_helper.download_file(key, local_path)
+                downloaded += 1
+        print(f"[INFO] R2 inputs synced: {downloaded} new files in {input_dir}")
+        _INPUTS_DOWNLOADED = True
+    except Exception as e:
+        print(f"[WARN] R2 input sync failed: {e}")
+
+
 def handler(job):
     """
     Images Endpoint Handler.
@@ -332,6 +359,8 @@ def handler(job):
 
     if not job_type:
         return {"error": "Missing required field: job_type"}
+
+    _ensure_r2_inputs()
     if not channel:
         return {"error": "Missing required field: channel"}
     if not content_id:
