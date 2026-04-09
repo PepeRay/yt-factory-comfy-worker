@@ -873,8 +873,23 @@ def _compose_full(src, dest, content_id, config):
 _INPUTS_DOWNLOADED = False
 
 
+def _upload_to_comfyui(local_path, subfolder=""):
+    """Upload a file to ComfyUI via HTTP API to register in its cache."""
+    url = f"http://{COMFY_HOST}/upload/image"
+    filename = os.path.basename(local_path)
+    with open(local_path, "rb") as f:
+        files = {"image": (filename, f, "application/octet-stream")}
+        data = {"subfolder": subfolder, "type": "input", "overwrite": "true"}
+        try:
+            import requests
+            resp = requests.post(url, files=files, data=data, timeout=30)
+            return resp.status_code == 200
+        except Exception:
+            return False
+
+
 def _ensure_r2_inputs():
-    """Download all R2 input files to /comfyui/input/ on first job (NV-free mode)."""
+    """Download all R2 input files and register with ComfyUI."""
     global _INPUTS_DOWNLOADED
     if _INPUTS_DOWNLOADED or not R2_ENABLED:
         return
@@ -883,6 +898,7 @@ def _ensure_r2_inputs():
         os.makedirs(input_dir, exist_ok=True)
         keys = r2_helper.list_files("inputs/audio/")
         downloaded = 0
+        uploaded = 0
         for key in keys:
             fname = os.path.basename(key)
             if not fname:
@@ -891,7 +907,9 @@ def _ensure_r2_inputs():
             if not os.path.exists(local_path):
                 r2_helper.download_file(key, local_path)
                 downloaded += 1
-        print(f"[INFO] R2 inputs synced: {downloaded} new files in {input_dir}")
+            if _upload_to_comfyui(local_path):
+                uploaded += 1
+        print(f"[INFO] R2 inputs: {downloaded} downloaded, {uploaded} registered with ComfyUI")
         _INPUTS_DOWNLOADED = True
     except Exception as e:
         print(f"[WARN] R2 input sync failed: {e}")
