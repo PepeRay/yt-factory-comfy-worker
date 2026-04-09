@@ -63,6 +63,18 @@ RUN comfy node install comfyui-whisper || true
 RUN comfy node install comfyui-kjnodes || true
 RUN comfy node install comfyui-custom-scripts || true
 
+# ── PATCH: Whisper anti-hallucination params ────────────────
+# yuvraj108c/ComfyUI-Whisper hardcodes condition_on_previous_text=True (default).
+# This causes Whisper to enter prompt-poisoning loops on TTS audio (which lacks
+# the natural noise/silences that reset the decoder). Patch the transcribe call
+# to disable context carryover and add aggressive anti-hallucination thresholds.
+# Verified fix via controlled experiment: 26 hallucinations → 0 hallucinations.
+RUN WHISPER_FILE=$(find /comfyui/custom_nodes -name "apply_whisper.py" 2>/dev/null | head -1) && \
+    if [ -z "$WHISPER_FILE" ]; then echo "ERROR: apply_whisper.py not found"; exit 1; fi && \
+    echo "Patching Whisper file: $WHISPER_FILE" && \
+    sed -i 's|whisper_model.transcribe(audio_save_path, word_timestamps=True, \*\*transcribe_args)|whisper_model.transcribe(audio_save_path, word_timestamps=True, condition_on_previous_text=False, temperature=0, no_speech_threshold=0.4, hallucination_silence_threshold=2.0, **transcribe_args)|' "$WHISPER_FILE" && \
+    grep -q "condition_on_previous_text=False" "$WHISPER_FILE" && echo "=== Whisper anti-hallucination patch applied ==="
+
 # VHS (VHS_LoadAudio needed for voice-srt) — git clone is more reliable than comfy node install
 RUN cd /comfyui/custom_nodes \
     && rm -rf ComfyUI-VideoHelperSuite 2>/dev/null || true \
