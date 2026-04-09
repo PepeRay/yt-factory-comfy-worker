@@ -36,7 +36,7 @@ if [ -d "/runpod-volume/ComfyUI" ]; then
 else
     echo "INFO: No Network Volume — using baked models"
     echo "No Network Volume — downloading inputs from R2..."
-    python /download_r2_inputs.py 2>/dev/null || echo "R2 input download skipped"
+    /opt/venv/bin/python /download_r2_inputs.py || echo "WARNING: R2 input download failed"
 fi
 
 mkdir -p /runpod-volume/jobs 2>/dev/null || true
