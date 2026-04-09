@@ -25,14 +25,27 @@
           "title": "⚙️ Qwen3-TTS Engine"
         }
       },
+      "15": {
+        "inputs": {
+          "audio": "Voz_Dominion.wav",
+          "audioUI": ""
+        },
+        "class_type": "LoadAudio",
+        "_meta": {
+          "title": "Load Voice Reference"
+        }
+      },
       "20": {
         "inputs": {
-          "voice_name": "Voz_Dominion.wav",
-          "reference_text": ""
+          "reference_text": "",
+          "audio_input": [
+            "15",
+            0
+          ]
         },
-        "class_type": "CharacterVoicesNode",
+        "class_type": "VoiceCaptureNode",
         "_meta": {
-          "title": "🎭 Character Voices"
+          "title": "🎙️ Voice Capture"
         }
       },
       "30": {
