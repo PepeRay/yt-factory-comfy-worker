@@ -1,0 +1,79 @@
+{
+  "input": {
+    "job_type": "txt-voice",
+    "channel": "dominion",
+    "content_id": "test-001",
+    "index": 1,
+    "workflow": {
+      "10": {
+        "inputs": {
+          "model_size": "1.7B",
+          "device": "cuda",
+          "voice_preset": "None (Zero-shot / Custom)",
+          "language": "English",
+          "instruct": "",
+          "top_k": 50,
+          "top_p": 1.0,
+          "temperature": 0.9,
+          "repetition_penalty": 1.05,
+          "max_new_tokens": 2048,
+          "dtype": "bfloat16",
+          "attn_implementation": "sdpa"
+        },
+        "class_type": "Qwen3TTSEngineNode",
+        "_meta": {
+          "title": "⚙️ Qwen3-TTS Engine"
+        }
+      },
+      "20": {
+        "inputs": {
+          "voice_name": "Voz_Dominion.wav",
+          "reference_text": ""
+        },
+        "class_type": "CharacterVoicesNode",
+        "_meta": {
+          "title": "🎭 Character Voices"
+        }
+      },
+      "30": {
+        "inputs": {
+          "text": "\"So is there a clean exit? \" Here is the false exit list: Stricter rules. It's good until risk migrates. Bigger hoses. Useful until politics balk. Let it burn. Brave until pensions melt and businesses miss payroll. Nationalize the dark. Impossible the dark is everywhere, by design. False exits aren't exits. They are detours back to the same turn. The real answer isn't romantic. It's transparency over theater. Measure leverage in funds, not just banks.",
+          "narrator_voice": "none",
+          "seed": 2538721887,
+          "enable_chunking": true,
+          "max_chars_per_chunk": 400,
+          "chunk_combination_method": "auto",
+          "silence_between_chunks_ms": 100,
+          "enable_audio_cache": false,
+          "batch_size": 0,
+          "TTS_engine": [
+            "10",
+            0
+          ],
+          "opt_narrator": [
+            "20",
+            0
+          ]
+        },
+        "class_type": "UnifiedTTSTextNode",
+        "_meta": {
+          "title": "🎤 TTS Text"
+        }
+      },
+      "40": {
+        "inputs": {
+          "filename_prefix": "audio/Dominion/ComfyUI",
+          "audioUI": "",
+          "audio": [
+            "30",
+            0
+          ]
+        },
+        "class_type": "SaveAudio",
+        "_meta": {
+          "title": "SaveAudio Qwen3-TTS"
+        }
+      }
+    }
+  }
+}
