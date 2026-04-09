@@ -282,23 +282,25 @@ def _get_video_duration(path):
 
 
 def _ensure_compose_inputs(channel, content_id, src, dest):
-    """Download compose inputs from R2 if not available locally (NV or disk).
-    Phase 1: NV has everything (dual-write). Phase 3: NV gone, R2 is source of truth."""
+    """Always download ALL compose inputs from R2 (NV-free: workers don't share filesystem).
+    Without NV, each worker only has files it generated locally. The compose worker
+    must download all files from R2 to get a complete picture."""
     if not R2_ENABLED:
         return
     for subdir in ("images", "video", "audio", "srt"):
         local_dir = os.path.join(src, subdir)
-        if os.path.isdir(local_dir) and os.listdir(local_dir):
-            continue
         r2_prefix = f"{channel}/{content_id}/source/{subdir}/"
         try:
             keys = r2_helper.list_files(r2_prefix)
             if keys:
                 os.makedirs(local_dir, exist_ok=True)
+                downloaded = 0
                 for key in keys:
                     local_path = os.path.join(local_dir, os.path.basename(key))
-                    r2_helper.download_file(key, local_path)
-                print(f"[INFO] Downloaded {len(keys)} files from R2 → {subdir}/")
+                    if not os.path.exists(local_path):
+                        r2_helper.download_file(key, local_path)
+                        downloaded += 1
+                print(f"[INFO] {subdir}/: {len(keys)} files in R2, {downloaded} downloaded")
         except Exception as e:
             print(f"[WARN] R2 download failed for {subdir}: {e}")
 
