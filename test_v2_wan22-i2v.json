@@ -95,10 +95,7 @@
           "width": 832,
           "height": 480,
           "length": 81,
-          "clip_vision_output": [
-            "27",
-            0
-          ],
+          "batch_size": 1,
           "start_image": [
             "14",
             0
@@ -132,31 +129,6 @@
         "class_type": "CLIPTextEncode",
         "_meta": {
           "title": "CLIP Text Encode (Negative)"
-        }
-      },
-      "26": {
-        "inputs": {
-          "clip_name": "clip_vision_h.safetensors"
-        },
-        "class_type": "CLIPVisionLoader",
-        "_meta": {
-          "title": "CLIP Vision Loader"
-        }
-      },
-      "27": {
-        "inputs": {
-          "clip_vision": [
-            "26",
-            0
-          ],
-          "image": [
-            "14",
-            0
-          ]
-        },
-        "class_type": "CLIPVisionEncode",
-        "_meta": {
-          "title": "CLIP Vision Encode"
         }
       },
       "30": {
