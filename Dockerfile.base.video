@@ -60,33 +60,14 @@ RUN grep -v -i -E '^(torch==|torch>=|torch<=|torchvision==|torchvision>=|torchau
 #   Power Lora Loader, Any Switch → rgthree-comfy
 #   CM_IntToFloat → comfymath
 #   easy cleanGpuUsed, easy clearCacheAll → comfyui-easy-use (VRAM cleanup mid-pipeline)
-#   LTXVFirstLastFrameControl_TTP → Comfyui_TTP_Toolset (kept for compatibility)
 #   Frames Slice → RES4LYF
-#   comfyui-ltxvideo kept for potential future use
-RUN comfy node install comfyui-ltxvideo || true && \
-    comfy node install comfyui-videohelpersuite || true && \
+RUN comfy node install comfyui-videohelpersuite || true && \
     comfy node install comfyui-kjnodes || true && \
     comfy node install comfyui-custom-scripts || true && \
     comfy node install comfyui-gguf || true && \
     comfy node install rgthree-comfy || true && \
     comfy node install comfymath || true && \
     comfy node install comfyui-easy-use || true
-
-# TTP Toolset — git clone + patch for ComfyUI 0.18.2 compatibility
-# Original uses comfy_api (requires ComfyUI >= 0.3.x), patch converts to traditional format
-# Retry logic: GitHub Actions runners sometimes hit transient network issues
-COPY patch_ttp_toolset.py /tmp/patch_ttp_toolset.py
-RUN cd /comfyui/custom_nodes && \
-    for attempt in 1 2 3; do \
-      echo "=== TTP Toolset clone attempt $attempt/3 ===" && \
-      git clone --depth 1 https://github.com/TTPlanetPig/Comfyui_TTP_Toolset.git && \
-      break || \
-      { echo "WARN: TTP Toolset clone attempt $attempt failed"; [ $attempt -lt 3 ] && sleep 5; }; \
-    done && \
-    test -d Comfyui_TTP_Toolset && \
-    python /tmp/patch_ttp_toolset.py /comfyui/custom_nodes/Comfyui_TTP_Toolset/LTXVFirstLastFrameControl_TTP.py && \
-    rm /tmp/patch_ttp_toolset.py && \
-    echo "=== TTP Toolset installed and patched ==="
 
 # RES4LYF — git clone + install deps (was NV-only, now baked)
 # Retry logic for CI/CD resilience
@@ -212,11 +193,6 @@ print(f'torch={torch.__version__}, numpy={numpy.__version__}, transformers={tran
 print('=== Video endpoint environment verified ===')"
 
 # ── Verify custom nodes (build-time gate) ───────────────────
-RUN test -d /comfyui/custom_nodes/Comfyui_TTP_Toolset && \
-    test -f /comfyui/custom_nodes/Comfyui_TTP_Toolset/__init__.py && \
-    grep -q "LTXVFirstLastFrameControl_TTP" /comfyui/custom_nodes/Comfyui_TTP_Toolset/__init__.py && \
-    echo "=== TTP Toolset custom node verified ==="
-
 RUN test -d /comfyui/custom_nodes/RES4LYF && \
     test -f /comfyui/custom_nodes/RES4LYF/__init__.py && \
     echo "=== RES4LYF custom node verified ==="

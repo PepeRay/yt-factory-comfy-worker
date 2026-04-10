@@ -1,7 +1,7 @@
 """
 YouTube Factory — Video Endpoint Handler
 Job types: img-vid, compose, download
-Models: LTX-Video 2.3, FFmpeg
+Models: Wan 2.2 I2V, FFmpeg
 """
 
 import json
@@ -357,7 +357,7 @@ def _compose_scene_manifest(src, dest, content_id, config, channel, platform="yo
     _gen_w, _gen_h, WIDTH, HEIGHT, FPS = PLATFORM_FORMATS.get(platform, DEFAULT_FORMAT)
     NORM = f"-vf scale={WIDTH}:{HEIGHT}:force_original_aspect_ratio=increase,crop={WIDTH}:{HEIGHT},setsar=1 -r {FPS} -c:v libx264 -preset fast -crf 26 -pix_fmt yuv420p -an"
 
-    # Directory for extracted ambient audio from LTX clips
+    # Directory for extracted ambient audio from video clips
     ambient_dir = os.path.join(segments_dir, "_ambient")
     os.makedirs(ambient_dir, exist_ok=True)
 
@@ -391,7 +391,7 @@ def _compose_scene_manifest(src, dest, content_id, config, channel, platform="yo
 
         try:
             if render_type == "video_clip":
-                # Use LTX-generated clip, normalize it
+                # Use video-generated clip, normalize it
                 clip_path = os.path.join(vid_dir, f"scene_{sid:03d}.mp4")
                 if not os.path.exists(clip_path):
                     # Fallback: try with different naming
@@ -405,7 +405,7 @@ def _compose_scene_manifest(src, dest, content_id, config, channel, platform="yo
                     result = subprocess.run(cmd.split(), capture_output=True, text=True, timeout=120)
                     if result.returncode != 0:
                         raise RuntimeError(f"segment {sid} video_clip: {result.stderr[:200]}")
-                    # Extract ambient audio from LTX clip (best effort)
+                    # Extract ambient audio from video clip (best effort)
                     ext_cmd = ["ffmpeg", "-y", "-i", clip_path, "-vn", "-c:a", "aac", "-b:a", "128k", amb_path]
                     ext_result = subprocess.run(ext_cmd, capture_output=True, text=True, timeout=30)
                     if ext_result.returncode != 0:
@@ -720,7 +720,7 @@ def _compose_scene_manifest(src, dest, content_id, config, channel, platform="yo
         filter_parts.append(f"[{music_idx}:a]volume=0.12[music]")
         audio_inputs.append("[music]")
     if amb_idx is not None:
-        # Ambient disabled � LTX AudioVAE generates music, not just SFX
+        # Ambient disabled — video models generate full clips with audio handled separately
         # filter_parts.append(f"[{amb_idx}:a]volume=0.08[amb]")
         has_ambient = False
         audio_inputs.append("[amb]")
@@ -948,7 +948,7 @@ def _ensure_img_vid_inputs(channel, content_id):
 def handler(job):
     """
     Video Endpoint Handler.
-    Accepts: img-vid (LTX-Video), compose (FFmpeg assembly), download (NV file retrieval)
+    Accepts: img-vid (Wan 2.2), compose (FFmpeg assembly), download (NV file retrieval)
     """
     job_input = job.get("input", {})
 
