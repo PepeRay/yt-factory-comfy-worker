@@ -281,6 +281,53 @@ def _get_video_duration(path):
     return float(result.stdout.strip())
 
 
+def _parse_time_to_seconds(value):
+    """Parse a time value to seconds.
+    Accepts float/int, or strings in 'HH:MM:SS,mmm' / 'HH:MM:SS.mmm' / 'MM:SS' / 'SS' format.
+    Returns None if value is None or unparseable.
+    """
+    if value is None:
+        return None
+    if isinstance(value, (int, float)):
+        return float(value)
+    s = str(value).strip().replace(",", ".")
+    if not s:
+        return None
+    try:
+        if ":" in s:
+            parts = s.split(":")
+            parts = [float(p) for p in parts]
+            if len(parts) == 3:
+                h, m, sec = parts
+                return h * 3600 + m * 60 + sec
+            if len(parts) == 2:
+                m, sec = parts
+                return m * 60 + sec
+        return float(s)
+    except (ValueError, TypeError):
+        return None
+
+
+def _pad_segment_to_duration(seg_path, out_path, pad_duration, width, height, fps):
+    """Create a new segment = seg_path + freeze-frame tail of pad_duration seconds."""
+    vf = (
+        f"scale={width}:{height}:force_original_aspect_ratio=increase,"
+        f"crop={width}:{height},setsar=1,"
+        f"tpad=stop_mode=clone:stop_duration={pad_duration:.4f}"
+    )
+    cmd = [
+        "ffmpeg", "-y", "-i", seg_path,
+        "-vf", vf,
+        "-r", str(fps),
+        "-c:v", "libx264", "-preset", "fast", "-crf", "26",
+        "-pix_fmt", "yuv420p", "-an", out_path,
+    ]
+    result = subprocess.run(cmd, capture_output=True, text=True, timeout=180)
+    if result.returncode != 0:
+        raise RuntimeError(f"pad segment failed: {result.stderr[-200:]}")
+    return out_path
+
+
 def _ensure_compose_inputs(channel, content_id, src, dest):
     """Always download ALL compose inputs from R2 (NV-free: workers don't share filesystem).
     Without NV, each worker only has files it generated locally. The compose worker
@@ -526,6 +573,57 @@ def _compose_scene_manifest(src, dest, content_id, config, channel, platform="yo
 
     print(f"Phase 1 done: {len(segment_paths)} segments, {skipped} skipped")
 
+    # ── Phase 1.5: Insert freeze-frame fillers for gaps between scenes ──
+    # Scene Director may emit gaps between consecutive scenes (scene[i+1].start_time
+    # != scene[i].start_time + scene[i].duration_sec). Narration audio respects
+    # those gaps but video would compress them, causing cumulative desync.
+    total_duration_sec = _parse_time_to_seconds(scenes_data.get("total_duration_sec"))
+    padded_segments = []
+    gap_fill_count = 0
+    for idx, entry in enumerate(segment_paths):
+        padded_segments.append(entry)
+        this_scene = entry["scene"]
+        this_start = _parse_time_to_seconds(this_scene.get("start_time"))
+        this_dur = float(this_scene.get("duration_sec", 0) or 0)
+
+        # Determine next boundary: next scene's start_time OR total_duration_sec for last
+        next_start = None
+        if idx + 1 < len(segment_paths):
+            next_start = _parse_time_to_seconds(segment_paths[idx + 1]["scene"].get("start_time"))
+        else:
+            next_start = total_duration_sec
+
+        if this_start is None or next_start is None:
+            continue
+
+        gap = next_start - (this_start + this_dur)
+        if gap > 0.05:
+            sid = this_scene.get("scene_id", idx)
+            filler_src = entry["path"]
+            filler_out = os.path.join(segments_dir, f"seg_{sid:04d}_gap.mp4")
+            try:
+                _pad_segment_to_duration(filler_src, filler_out, gap, WIDTH, HEIGHT, FPS)
+                padded_segments.append({"path": filler_out, "scene": {
+                    "scene_id": f"{sid}_gap",
+                    "duration_sec": gap,
+                    "transition_in": "cut",
+                    "transition_duration_sec": 0,
+                }})
+                # Generate matching silence for ambient track continuity
+                amb_gap = os.path.join(ambient_dir, f"amb_{sid:04d}_gap.aac")
+                sil_cmd = ["ffmpeg", "-y", "-f", "lavfi", "-i",
+                           "anullsrc=r=44100:cl=stereo", "-t", f"{gap:.4f}",
+                           "-c:a", "aac", amb_gap]
+                subprocess.run(sil_cmd, capture_output=True, text=True, timeout=30)
+                gap_fill_count += 1
+                print(f"[gap-fill sid={sid}] +{gap:.4f}s freeze-frame (scene_end={this_start + this_dur:.4f} next_start={next_start:.4f})")
+            except Exception as e:
+                print(f"WARN: gap-fill sid={sid} failed: {e}")
+
+    if gap_fill_count:
+        segment_paths = padded_segments
+        print(f"Phase 1.5 done: {gap_fill_count} gap fillers inserted ({len(segment_paths)} total segments)")
+
     # Concatenate ambient audio track from all segments
     ambient_files = sorted(glob_module.glob(os.path.join(ambient_dir, "amb_*.aac")))
     ambient_concat_path = os.path.join(segments_dir, "ambient_full.aac")
@@ -610,6 +708,33 @@ def _compose_scene_manifest(src, dest, content_id, config, channel, platform="yo
             merged_path = xfade_out
 
     print(f"Phase 2 done: transitions applied")
+
+    # ── Phase 2.5: Safety net — pad merged video to match total_duration_sec ──
+    # Guarantees video length >= narration target regardless of what Director emits.
+    target_total = _parse_time_to_seconds(scenes_data.get("total_duration_sec"))
+    if target_total and target_total > 0:
+        try:
+            merged_real = _get_video_duration(merged_path)
+            delta_total = target_total - merged_real
+            if delta_total > 0.1:
+                safety_out = os.path.join(segments_dir, "merged_safety.mp4")
+                cmd = [
+                    "ffmpeg", "-y", "-i", merged_path,
+                    "-vf", f"tpad=stop_mode=clone:stop_duration={delta_total:.4f}",
+                    "-r", str(FPS),
+                    "-c:v", "libx264", "-preset", "fast", "-crf", "18",
+                    "-pix_fmt", "yuv420p", "-an", safety_out,
+                ]
+                result = subprocess.run(cmd, capture_output=True, text=True, timeout=600)
+                if result.returncode == 0:
+                    merged_path = safety_out
+                    print(f"Phase 2.5: safety pad +{delta_total:.4f}s (merged={merged_real:.4f} target={target_total:.4f})")
+                else:
+                    print(f"WARN: safety pad failed: {result.stderr[-200:]}")
+            else:
+                print(f"Phase 2.5: no pad needed (merged={merged_real:.4f} target={target_total:.4f} delta={delta_total:.4f})")
+        except Exception as e:
+            print(f"WARN: Phase 2.5 safety check failed: {e}")
 
     # ── Phase 3: Mux with narration + music + ambient + subtitles ──
     audio_path = os.path.join(dest, f"{content_id}_audio.flac")
@@ -769,7 +894,7 @@ def _compose_scene_manifest(src, dest, content_id, config, channel, platform="yo
 
     if audio_inputs:
         if len(audio_inputs) > 1:
-            mix_filter = "".join(audio_inputs) + f"amix=inputs={len(audio_inputs)}:duration=first[aout]"
+            mix_filter = "".join(audio_inputs) + f"amix=inputs={len(audio_inputs)}:duration=longest[aout]"
             filter_parts.append(mix_filter)
             # When using filter_complex, subtitles must be inside it (can't mix -vf and -filter_complex)
             if srt_filter:
@@ -784,7 +909,7 @@ def _compose_scene_manifest(src, dest, content_id, config, channel, platform="yo
             if srt_filter:
                 cmd += ["-vf", srt_filter]
         cmd += ["-c:v", "libx264", "-preset", "fast", "-crf", "18",
-                "-c:a", "aac", "-b:a", "192k", "-shortest", output_path]
+                "-c:a", "aac", "-b:a", "192k", output_path]
     elif has_srt:
         cmd += ["-vf", srt_filter,
                 "-c:v", "libx264", "-preset", "fast", "-crf", "18", output_path]
