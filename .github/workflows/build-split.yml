@@ -131,6 +131,8 @@ jobs:
     permissions:
       contents: read
       packages: write
+    outputs:
+      image_tag: ${{ steps.meta.outputs.image_tag }}
     steps:
       - name: Free disk space on runner
         uses: jlumbroso/free-disk-space@main
@@ -153,7 +155,9 @@ jobs:
 
       - uses: docker/setup-buildx-action@v3
 
-      - uses: docker/build-push-action@v6
+      - name: Build & push video slim image
+        id: build-video
+        uses: docker/build-push-action@v6
         with:
           context: .
           file: Dockerfile.video.slim
@@ -161,51 +165,90 @@ jobs:
           tags: |
             ${{ env.IMAGE_PREFIX }}-video:latest
             ${{ env.IMAGE_PREFIX }}-video:${{ github.sha }}
-          cache-from: type=gha,scope=video
-          cache-to: type=gha,mode=max,scope=video
 
-  update-runpod:
-    # DISABLED: RunPod templates now point to base images (built via build-base.yml)
-    # The CI/CD images here don't have models baked in. Don't overwrite the templates.
-    needs: [build-audio, build-images, build-video]
-    if: false
+      - name: Expose image tag for downstream jobs
+        id: meta
+        run: |
+          echo "image_tag=${{ env.IMAGE_PREFIX }}-video:${{ github.sha }}" >> "$GITHUB_OUTPUT"
+
+  update-runpod-video:
+    # Auto-updates the RunPod video template (id 5ejm0u3xrt) when build-video
+    # succeeds. Uses GraphQL query+mutation preserving all template fields,
+    # only changing imageName to the new SHA tag. Only touches the video
+    # template — audio and images templates still point to base images and
+    # are NOT updated here.
+    needs: build-video
+    if: needs.build-video.result == 'success'
     runs-on: ubuntu-latest
     steps:
-      - name: Update RunPod templates
+      - name: Update RunPod video template imageName
         env:
           RUNPOD_API_KEY: ${{ secrets.RUNPOD_API_KEY }}
-          R2_ENDPOINT: ${{ secrets.R2_ENDPOINT }}
-          R2_ACCESS_KEY_ID: ${{ secrets.R2_ACCESS_KEY_ID }}
-          R2_SECRET_ACCESS_KEY: ${{ secrets.R2_SECRET_ACCESS_KEY }}
-          R2_BUCKET: ${{ secrets.R2_BUCKET }}
+          TEMPLATE_ID: 5ejm0u3xrt
+          NEW_IMAGE: ${{ needs.build-video.outputs.image_tag }}
         run: |
-          SHA="${{ github.sha }}"
-          PREFIX="ghcr.io/peperay/yt-factory"
+          set -euo pipefail
 
-          # R2 env vars — preserved across deploys via GitHub Secrets
-          R2_ENV="{key: \\\"R2_ENDPOINT\\\", value: \\\"${R2_ENDPOINT}\\\"}, {key: \\\"R2_ACCESS_KEY_ID\\\", value: \\\"${R2_ACCESS_KEY_ID}\\\"}, {key: \\\"R2_SECRET_ACCESS_KEY\\\", value: \\\"${R2_SECRET_ACCESS_KEY}\\\"}, {key: \\\"R2_BUCKET\\\", value: \\\"${R2_BUCKET}\\\"}"
-
-          update_template() {
-            local id=$1 name=$2 image=$3
-            echo "Updating $name → $image"
-            curl -s -X POST https://api.runpod.io/graphql \
-              -H "Content-Type: application/json" \
-              -H "Authorization: Bearer $RUNPOD_API_KEY" \
-              -d "{\"query\": \"mutation { saveTemplate(input: { id: \\\"$id\\\", name: \\\"$name\\\", imageName: \\\"$image\\\", containerDiskInGb: 20, volumeInGb: 0, dockerArgs: \\\"\\\", env: [$R2_ENV] }) { id name imageName } }\"}"
-            echo ""
-          }
-
-          # Only update templates for endpoints that were rebuilt
-          if [ "${{ needs.build-audio.result }}" == "success" ]; then
-            update_template "lnri07h5s2" "yt-factory-audio" "${PREFIX}-audio:${SHA}"
+          if [ -z "${RUNPOD_API_KEY:-}" ]; then
+            echo "ERROR: RUNPOD_API_KEY secret is missing"
+            exit 1
           fi
 
-          if [ "${{ needs.build-images.result }}" == "success" ]; then
-            update_template "7y8167cpbf" "yt-factory-images" "${PREFIX}-images:${SHA}"
+          echo "Fetching current video template (id=${TEMPLATE_ID})..."
+          QUERY_BODY=$(jq -cn --arg id "$TEMPLATE_ID" '{
+            query: "query Template($id: String!) { podTemplate(id: $id) { id name imageName containerDiskInGb volumeInGb volumeMountPath dockerArgs ports isServerless readme env { key value } } }",
+            variables: { id: $id }
+          }')
+
+          RESPONSE=$(curl -sS -X POST "https://api.runpod.io/graphql?api_key=${RUNPOD_API_KEY}" \
+            -H "Content-Type: application/json" \
+            -d "$QUERY_BODY")
+
+          echo "Query response:"
+          echo "$RESPONSE" | jq '.data.podTemplate | {id, name, imageName, containerDiskInGb, volumeInGb, envCount: (.env | length)}'
+
+          if ! echo "$RESPONSE" | jq -e '.data.podTemplate' > /dev/null; then
+            echo "ERROR: Failed to fetch template. Full response:"
+            echo "$RESPONSE"
+            exit 1
           fi
 
-          if [ "${{ needs.build-video.result }}" == "success" ]; then
-            update_template "VIDEO_TEMPLATE_ID" "yt-factory-video" "${PREFIX}-video:${SHA}"
+          echo "Building mutation input with new imageName=${NEW_IMAGE}..."
+          MUTATION_BODY=$(echo "$RESPONSE" | jq -c --arg new "$NEW_IMAGE" '
+            .data.podTemplate as $t
+            | {
+                query: "mutation SaveTemplate($input: SaveTemplateInput!) { saveTemplate(input: $input) { id name imageName } }",
+                variables: {
+                  input: {
+                    id: $t.id,
+                    name: $t.name,
+                    imageName: $new,
+                    containerDiskInGb: $t.containerDiskInGb,
+                    volumeInGb: $t.volumeInGb,
+                    volumeMountPath: $t.volumeMountPath,
+                    dockerArgs: $t.dockerArgs,
+                    ports: $t.ports,
+                    isServerless: $t.isServerless,
+                    readme: $t.readme,
+                    env: ($t.env | map({key, value}))
+                  }
+                }
+              }
+          ')
+
+          MUTATION_RESPONSE=$(curl -sS -X POST "https://api.runpod.io/graphql?api_key=${RUNPOD_API_KEY}" \
+            -H "Content-Type: application/json" \
+            -d "$MUTATION_BODY")
+
+          echo "Mutation response:"
+          echo "$MUTATION_RESPONSE"
+
+          if ! echo "$MUTATION_RESPONSE" | jq -e '.data.saveTemplate.id' > /dev/null; then
+            echo "ERROR: saveTemplate mutation failed"
+            exit 1
           fi
 
-          echo "=== RunPod templates updated (SHA: ${SHA}) ==="
+          UPDATED_IMAGE=$(echo "$MUTATION_RESPONSE" | jq -r '.data.saveTemplate.imageName')
+          echo "=== RunPod video template updated successfully ==="
+          echo "Template ID: ${TEMPLATE_ID}"
+          echo "New imageName: ${UPDATED_IMAGE}"
