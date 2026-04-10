@@ -370,6 +370,289 @@ def _ensure_compose_inputs(channel, content_id, src, dest):
                 print(f"[WARN] R2 concat audio download failed: {e}")
 
 
+# ── Scene Director visual effects ──────────────────────────
+# The Scene Director (LLM) emits one of 16 effect strings per image-based
+# scene. Everything below maps an effect name to a concrete ffmpeg filter
+# chain. All effects output WxH @ fps, h264 yuv420p, exact duration_sec.
+# Output is an MP4 with no audio (ambient silence is generated separately).
+
+PARTICLES_ASSET_CANDIDATES = [
+    "/workspace/assets/particles.mov",
+    "/runpod-volume/assets/particles.mov",
+    "/comfyui/input/particles.mov",
+]
+
+# Zoompan is notoriously finicky: it needs a large pre-scaled input to avoid
+# jitter (the classic "wobble" artifact on integer pixel snaps).
+# scale=8000:-1 mirrors what the existing ken_burns branch was already doing.
+_ZOOMPAN_PRESCALE = "scale=8000:-1"
+
+
+def _zoompan_chain(z_expr, x_expr, y_expr, frames, w, h, fps):
+    """Build a standard zoompan filter string for an effect."""
+    return (
+        f"{_ZOOMPAN_PRESCALE},"
+        f"zoompan=z='{z_expr}':x='{x_expr}':y='{y_expr}'"
+        f":d={frames}:s={w}x{h}:fps={fps},"
+        f"format=yuv420p"
+    )
+
+
+def _run_single_image_effect(img_path, filter_complex, duration, seg_path):
+    """Run ffmpeg for a single-image effect. Centralized so every effect
+    uses the same encoder flags (h264 yuv420p, preset fast, crf 18)."""
+    cmd = [
+        "ffmpeg", "-y", "-loop", "1", "-i", img_path,
+        "-filter_complex", filter_complex,
+        "-t", f"{duration:.4f}",
+        "-c:v", "libx264", "-preset", "fast", "-crf", "18",
+        "-pix_fmt", "yuv420p", "-an", seg_path,
+    ]
+    result = subprocess.run(cmd, capture_output=True, text=True, timeout=180)
+    if result.returncode != 0:
+        raise RuntimeError(f"effect render failed: {result.stderr[-300:]}")
+    return seg_path
+
+
+def _find_particles_asset():
+    for p in PARTICLES_ASSET_CANDIDATES:
+        if os.path.isfile(p):
+            return p
+    return None
+
+
+def _render_image_effect(effect, img_a, img_b, duration, seg_path, w, h, fps):
+    """Route a scene effect to the correct ffmpeg filter chain.
+
+    effect:   One of the 16 Scene Director effect strings. Unknown → static.
+    img_a:    Primary image path (required).
+    img_b:    Secondary image path (only for parallax / match_cut). May be None.
+    duration: Exact seconds for the segment.
+    seg_path: Output mp4 path.
+    w,h,fps:  Platform target dims / framerate.
+    Returns seg_path. Raises on ffmpeg failure.
+    """
+    frames = max(1, int(round(duration * fps)))
+    # Centered x/y expressions used by most zoompan variants
+    cx = "iw/2-(iw/zoom/2)"
+    cy = "ih/2-(ih/zoom/2)"
+
+    # Normalize unknown / missing effect → fallback chain.
+    if not effect:
+        effect = "ken_burns_slow"
+    original_effect = effect
+
+    # Parallax / match_cut need two images. Fallback silently if only one.
+    if effect in ("parallax", "match_cut") and not img_b:
+        print(f"[effect] {effect} requested but only 1 image available, fallback → ken_burns_slow")
+        effect = "ken_burns_slow"
+
+    # ---- Ken Burns family (zoom in/out, centered) ------------------------
+    if effect == "ken_burns_in":
+        # Slow zoom from 1.0 → 1.15 over the whole duration
+        z = f"min(zoom+0.0010,1.15)"
+        fc = _zoompan_chain(z, cx, cy, frames, w, h, fps)
+    elif effect == "ken_burns_out":
+        # Start at 1.15x and zoom out toward 1.0x. zoompan's z is a running
+        # accumulator; we initialize it at 1.15 and decrement each frame.
+        z = f"if(eq(on,0),1.15,max(zoom-0.0010,1.0))"
+        fc = _zoompan_chain(z, cx, cy, frames, w, h, fps)
+    elif effect == "ken_burns_slow":
+        z = f"min(zoom+0.0006,1.08)"
+        fc = _zoompan_chain(z, cx, cy, frames, w, h, fps)
+    elif effect == "ken_burns_fast":
+        z = f"min(zoom+0.0025,1.35)"
+        fc = _zoompan_chain(z, cx, cy, frames, w, h, fps)
+
+    # ---- Pan L/R: horizontal camera slide, slight zoom so crop is valid --
+    elif effect == "pan_left":
+        # Camera moves left→right across the frame (image appears to slide L)
+        z = "1.20"
+        x = f"(iw-iw/zoom)*on/{frames}"
+        y = cy
+        fc = _zoompan_chain(z, x, y, frames, w, h, fps)
+    elif effect == "pan_right":
+        z = "1.20"
+        x = f"(iw-iw/zoom)*(1-on/{frames})"
+        y = cy
+        fc = _zoompan_chain(z, x, y, frames, w, h, fps)
+
+    # ---- Tilt up/down: vertical camera slide ----------------------------
+    elif effect == "tilt_up":
+        # Camera rises: y goes from bottom→top
+        z = "1.20"
+        x = cx
+        y = f"(ih-ih/zoom)*(1-on/{frames})"
+        fc = _zoompan_chain(z, x, y, frames, w, h, fps)
+    elif effect == "tilt_down":
+        z = "1.20"
+        x = cx
+        y = f"(ih-ih/zoom)*on/{frames}"
+        fc = _zoompan_chain(z, x, y, frames, w, h, fps)
+
+    # ---- Rapid zoom in/out: more aggressive than Ken Burns fast ---------
+    elif effect == "zoom_in":
+        z = f"min(zoom+0.0040,1.50)"
+        fc = _zoompan_chain(z, cx, cy, frames, w, h, fps)
+    elif effect == "zoom_out":
+        z = f"if(eq(on,0),1.50,max(zoom-0.0040,1.0))"
+        fc = _zoompan_chain(z, cx, cy, frames, w, h, fps)
+
+    # ---- Whip pan: intra-scene fast horizontal pan with motion blur -----
+    # Strategy: the first ~0.35s is a whip (zoompan with huge x delta + tmix
+    # motion blur) and the remainder is stable ken_burns_slow. Chosen as
+    # entrance because the Director emits whip_pan to *introduce* a scene.
+    elif effect == "whip_pan":
+        whip_dur = min(0.35, duration * 0.25)
+        whip_frames = max(1, int(round(whip_dur * fps)))
+        stable_frames = max(1, frames - whip_frames)
+        fc = (
+            f"{_ZOOMPAN_PRESCALE},"
+            f"zoompan=z='1.25':x='(iw-iw/zoom)*on/{whip_frames}':y='{cy}'"
+            f":d={whip_frames}:s={w}x{h}:fps={fps},"
+            f"tmix=frames=5:weights='1 1 1 1 1',"
+            f"format=yuv420p"
+        )
+        # Two-pass: render whip segment then append ken_burns_slow segment
+        # via concat. Keeping it single-pass is simpler but visually worse;
+        # for v1 we fake motion blur with tmix and let the whole duration
+        # share the same filter chain to avoid a second concat step.
+        # Override: single zoompan over full duration with tmix blur.
+        fc = (
+            f"{_ZOOMPAN_PRESCALE},"
+            f"zoompan=z='1.25':x='if(lt(on,{whip_frames}),(iw-iw/zoom)*on/{whip_frames},(iw-iw/zoom))':y='{cy}'"
+            f":d={frames}:s={w}x{h}:fps={fps},"
+            f"tmix=frames=5:weights='1 1 1 1 1',"
+            f"format=yuv420p"
+        )
+
+    # ---- Static: single image, no movement ------------------------------
+    elif effect == "static":
+        fc = (
+            f"scale={w}:{h}:force_original_aspect_ratio=increase,"
+            f"crop={w}:{h},setsar=1,format=yuv420p"
+        )
+
+    # ---- Particles: overlay particles.mov on ken_burns_slow -------------
+    elif effect == "particles":
+        particles = _find_particles_asset()
+        if particles:
+            print(f"[effect] particles using asset {particles}")
+            # Two-input overlay — handled below with a dedicated ffmpeg call
+            return _render_particles(img_a, particles, duration, seg_path, w, h, fps)
+        print(f"[effect] particles fallback → ken_burns_slow + noise (no asset found)")
+        z = f"min(zoom+0.0006,1.08)"
+        fc = (
+            f"{_ZOOMPAN_PRESCALE},"
+            f"zoompan=z='{z}':x='{cx}':y='{cy}'"
+            f":d={frames}:s={w}x{h}:fps={fps},"
+            f"noise=alls=8:allf=t+u,format=yuv420p"
+        )
+
+    # ---- Parallax: fg/bg layers at different speeds --------------------
+    elif effect == "parallax":
+        # img_a = foreground (sharper), img_b = background (blurred, slower).
+        # We overlay a scaled fg over a slowly panning, blurred bg.
+        return _render_parallax(img_a, img_b, duration, seg_path, w, h, fps)
+
+    # ---- Match cut: two images back-to-back, no transition -------------
+    elif effect == "match_cut":
+        return _render_match_cut(img_a, img_b, duration, seg_path, w, h, fps)
+
+    # ---- Unknown effect: fallback to static -----------------------------
+    else:
+        print(f"[effect] unknown '{original_effect}', fallback → static")
+        fc = (
+            f"scale={w}:{h}:force_original_aspect_ratio=increase,"
+            f"crop={w}:{h},setsar=1,format=yuv420p"
+        )
+
+    print(f"[effect] {original_effect} d={duration:.2f}s")
+    return _run_single_image_effect(img_a, fc, duration, seg_path)
+
+
+def _render_parallax(img_fg, img_bg, duration, seg_path, w, h, fps):
+    """Parallax: blurred bg pans slow, fg pans faster (2 images required)."""
+    frames = max(1, int(round(duration * fps)))
+    # bg: heavy blur, subtle pan; fg: full res, twice the pan speed.
+    # Both scaled to w*1.25 so panning has travel room.
+    fc = (
+        f"[0:v]scale={int(w*1.25)}:-1,crop={w}:{h}:x='(iw-{w})*(on/{frames})*0.5':y='(ih-{h})/2',setsar=1[fg];"
+        f"[1:v]scale={int(w*1.4)}:-1,boxblur=20:2,crop={w}:{h}:x='(iw-{w})*(on/{frames})*0.2':y='(ih-{h})/2',setsar=1[bg];"
+        f"[bg][fg]overlay=0:0:format=auto,format=yuv420p"
+    )
+    cmd = [
+        "ffmpeg", "-y",
+        "-loop", "1", "-i", img_fg,
+        "-loop", "1", "-i", img_bg,
+        "-filter_complex", fc,
+        "-t", f"{duration:.4f}", "-r", str(fps),
+        "-c:v", "libx264", "-preset", "fast", "-crf", "18",
+        "-pix_fmt", "yuv420p", "-an", seg_path,
+    ]
+    print(f"[effect] parallax d={duration:.2f}s (fg={os.path.basename(img_fg)} bg={os.path.basename(img_bg)})")
+    result = subprocess.run(cmd, capture_output=True, text=True, timeout=180)
+    if result.returncode != 0:
+        raise RuntimeError(f"parallax render failed: {result.stderr[-300:]}")
+    return seg_path
+
+
+def _render_match_cut(img_a, img_b, duration, seg_path, w, h, fps):
+    """Match cut: img_a for first half, img_b for second half, no transition.
+    Hard cut at exactly duration/2. Director guarantees composition alignment."""
+    half = duration / 2.0
+    fc = (
+        f"[0:v]scale={w}:{h}:force_original_aspect_ratio=increase,"
+        f"crop={w}:{h},setsar=1,format=yuv420p,trim=duration={half:.4f}[a];"
+        f"[1:v]scale={w}:{h}:force_original_aspect_ratio=increase,"
+        f"crop={w}:{h},setsar=1,format=yuv420p,trim=duration={half:.4f}[b];"
+        f"[a][b]concat=n=2:v=1:a=0[v]"
+    )
+    cmd = [
+        "ffmpeg", "-y",
+        "-loop", "1", "-i", img_a,
+        "-loop", "1", "-i", img_b,
+        "-filter_complex", fc, "-map", "[v]",
+        "-t", f"{duration:.4f}", "-r", str(fps),
+        "-c:v", "libx264", "-preset", "fast", "-crf", "18",
+        "-pix_fmt", "yuv420p", "-an", seg_path,
+    ]
+    print(f"[effect] match_cut d={duration:.2f}s (a={os.path.basename(img_a)} b={os.path.basename(img_b)})")
+    result = subprocess.run(cmd, capture_output=True, text=True, timeout=180)
+    if result.returncode != 0:
+        raise RuntimeError(f"match_cut render failed: {result.stderr[-300:]}")
+    return seg_path
+
+
+def _render_particles(img_path, particles_path, duration, seg_path, w, h, fps):
+    """Overlay looping particles.mov on top of a ken_burns_slow base."""
+    frames = max(1, int(round(duration * fps)))
+    cx = "iw/2-(iw/zoom/2)"
+    cy = "ih/2-(ih/zoom/2)"
+    z = f"min(zoom+0.0006,1.08)"
+    fc = (
+        f"[0:v]{_ZOOMPAN_PRESCALE},"
+        f"zoompan=z='{z}':x='{cx}':y='{cy}'"
+        f":d={frames}:s={w}x{h}:fps={fps},format=yuv420p[base];"
+        f"[1:v]scale={w}:{h},format=yuva420p,colorchannelmixer=aa=0.7[parts];"
+        f"[base][parts]overlay=0:0:shortest=0,format=yuv420p"
+    )
+    cmd = [
+        "ffmpeg", "-y",
+        "-loop", "1", "-i", img_path,
+        "-stream_loop", "-1", "-i", particles_path,
+        "-filter_complex", fc,
+        "-t", f"{duration:.4f}", "-r", str(fps),
+        "-c:v", "libx264", "-preset", "fast", "-crf", "18",
+        "-pix_fmt", "yuv420p", "-an", seg_path,
+    ]
+    print(f"[effect] particles d={duration:.2f}s")
+    result = subprocess.run(cmd, capture_output=True, text=True, timeout=180)
+    if result.returncode != 0:
+        raise RuntimeError(f"particles render failed: {result.stderr[-300:]}")
+    return seg_path
+
+
 def _compose_scene_manifest(src, dest, content_id, config, channel, platform="youtube"):
     """
     Compose full video from scenes.json v2 manifest.
@@ -431,7 +714,12 @@ def _compose_scene_manifest(src, dest, content_id, config, channel, platform="yo
 
     for scene in scenes:
         sid = scene["scene_id"]
-        render_type = scene.get("render_type", "ken_burns")
+        # New Director schema uses `effect` for image-based scenes and
+        # `video_clip` as a special render_type. If render_type is absent
+        # but `effect` is present, treat it as an image-based scene.
+        render_type = scene.get("render_type")
+        if not render_type:
+            render_type = "video_clip" if scene.get("effect") == "video_clip" else "ken_burns"
         duration = scene.get("duration_sec", 5)
         seg_path = os.path.join(segments_dir, f"seg_{sid:04d}.mp4")
         amb_path = os.path.join(ambient_dir, f"amb_{sid:04d}.aac")
@@ -537,28 +825,32 @@ def _compose_scene_manifest(src, dest, content_id, config, channel, platform="yo
                     continue
 
             if render_type == "ken_burns":
-                # Slow zoom on single image
-                img_path = _find_image(img_dir, sid, "initial")
-                if not img_path:
-                    print(f"WARN: scene {sid} ken_burns missing image, skipping")
+                # Image-based scene. New Scene Director emits a `effect` field
+                # with one of 16 possible values. Legacy scenes without it
+                # default to ken_burns_slow for backward compatibility.
+                effect = scene.get("effect") or "ken_burns_slow"
+                img_a = _find_image(img_dir, sid, "initial")
+                if not img_a:
+                    print(f"WARN: scene {sid} missing image, skipping")
                     skipped += 1
                     continue
-                frames = int(duration * FPS)
-                # Zoom from 1.0x to 1.15x centered
-                cmd = [
-                    "ffmpeg", "-y", "-i", img_path,
-                    "-filter_complex",
-                    f"scale=8000:-1,"
-                    f"zoompan=z='1+0.15*on/{frames}':x='iw/2-(iw/zoom/2)':y='ih/2-(ih/zoom/2)'"
-                    f":d={frames}:s={WIDTH}x{HEIGHT}:fps={FPS},"
-                    f"format=yuv420p",
-                    "-t", str(duration),
-                    "-c:v", "libx264", "-preset", "fast", "-crf", "18",
-                    seg_path
-                ]
-                result = subprocess.run(cmd, capture_output=True, text=True, timeout=120)
-                if result.returncode != 0:
-                    raise RuntimeError(f"segment {sid} ken_burns: {result.stderr[-200:]}")
+                # parallax / match_cut may request a second image. Director
+                # sets images_needed=2 for those. We look for the "final"
+                # frame slot (already used by legacy crossfade).
+                img_b = None
+                if effect in ("parallax", "match_cut") or scene.get("images_needed") == 2:
+                    img_b = _find_image(img_dir, sid, "final")
+
+                try:
+                    _render_image_effect(effect, img_a, img_b, float(duration),
+                                         seg_path, WIDTH, HEIGHT, FPS)
+                except Exception as e:
+                    print(f"WARN: scene {sid} effect '{effect}' failed ({e}), falling back to static")
+                    # Last-resort fallback: static render. Never let a bad
+                    # effect string kill the whole compose run.
+                    _render_image_effect("static", img_a, None, float(duration),
+                                         seg_path, WIDTH, HEIGHT, FPS)
+
                 # Generate silence for non-video scenes
                 sil_cmd = ["ffmpeg", "-y", "-f", "lavfi", "-i", f"anullsrc=r=44100:cl=stereo", "-t", str(duration), "-c:a", "aac", amb_path]
                 subprocess.run(sil_cmd, capture_output=True, text=True, timeout=30)
