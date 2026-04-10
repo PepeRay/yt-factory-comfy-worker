@@ -277,7 +277,7 @@ def _get_video_duration(path):
     ]
     result = subprocess.run(cmd, capture_output=True, text=True, timeout=30)
     if result.returncode != 0:
-        raise RuntimeError(f"ffprobe failed for {path}: {result.stderr[:200]}")
+        raise RuntimeError(f"ffprobe failed for {path}: {result.stderr[-200:]}")
     return float(result.stdout.strip())
 
 
@@ -404,7 +404,7 @@ def _compose_scene_manifest(src, dest, content_id, config, channel, platform="yo
                     cmd = f"ffmpeg -y -i {clip_path} {NORM} {seg_path}"
                     result = subprocess.run(cmd.split(), capture_output=True, text=True, timeout=120)
                     if result.returncode != 0:
-                        raise RuntimeError(f"segment {sid} video_clip: {result.stderr[:200]}")
+                        raise RuntimeError(f"segment {sid} video_clip: {result.stderr[-200:]}")
                     # Extract ambient audio from video clip (best effort)
                     ext_cmd = ["ffmpeg", "-y", "-i", clip_path, "-vn", "-c:a", "aac", "-b:a", "128k", amb_path]
                     ext_result = subprocess.run(ext_cmd, capture_output=True, text=True, timeout=30)
@@ -442,7 +442,7 @@ def _compose_scene_manifest(src, dest, content_id, config, channel, platform="yo
                     ]
                     result = subprocess.run(cmd, capture_output=True, text=True, timeout=120)
                     if result.returncode != 0:
-                        raise RuntimeError(f"segment {sid} crossfade: {result.stderr[:200]}")
+                        raise RuntimeError(f"segment {sid} crossfade: {result.stderr[-200:]}")
                     # Generate silence for non-video scenes
                     sil_cmd = ["ffmpeg", "-y", "-f", "lavfi", "-i", f"anullsrc=r=44100:cl=stereo", "-t", str(duration), "-c:a", "aac", amb_path]
                     subprocess.run(sil_cmd, capture_output=True, text=True, timeout=30)
@@ -471,7 +471,7 @@ def _compose_scene_manifest(src, dest, content_id, config, channel, platform="yo
                 ]
                 result = subprocess.run(cmd, capture_output=True, text=True, timeout=120)
                 if result.returncode != 0:
-                    raise RuntimeError(f"segment {sid} ken_burns: {result.stderr[:200]}")
+                    raise RuntimeError(f"segment {sid} ken_burns: {result.stderr[-200:]}")
                 # Generate silence for non-video scenes
                 sil_cmd = ["ffmpeg", "-y", "-f", "lavfi", "-i", f"anullsrc=r=44100:cl=stereo", "-t", str(duration), "-c:a", "aac", amb_path]
                 subprocess.run(sil_cmd, capture_output=True, text=True, timeout=30)
@@ -639,7 +639,7 @@ def _compose_scene_manifest(src, dest, content_id, config, channel, platform="yo
                    "-t", str(act_dur), "-c:a", "aac", "-b:a", "128k", seg_path]
             result = subprocess.run(cmd, capture_output=True, text=True, timeout=60)
             if result.returncode != 0:
-                print(f"Music: failed to build act {i}: {result.stderr[:200]}")
+                print(f"Music: failed to build act {i}: {result.stderr[-200:]}")
                 continue
             act_segments.append({"path": seg_path, "dur": act_dur, "mood": mood})
 
@@ -722,8 +722,8 @@ def _compose_scene_manifest(src, dest, content_id, config, channel, platform="yo
     if amb_idx is not None:
         # Ambient disabled — video models generate full clips with audio handled separately
         # filter_parts.append(f"[{amb_idx}:a]volume=0.08[amb]")
+        # audio_inputs.append("[amb]")  # ambient stream not defined, don't reference it
         has_ambient = False
-        audio_inputs.append("[amb]")
 
     srt_filter = f"subtitles={srt_path}:force_style='FontSize=22,PrimaryColour=&H00FFFFFF'" if has_srt else None
 
@@ -760,7 +760,7 @@ def _compose_scene_manifest(src, dest, content_id, config, channel, platform="yo
         print(f"Phase 3: mixing {' + '.join(layers) if layers else 'video only'}")
         result = subprocess.run(cmd, capture_output=True, text=True, timeout=900)
         if result.returncode != 0:
-            raise RuntimeError(f"Phase 3 mux failed: {result.stderr[:500]}")
+            raise RuntimeError(f"Phase 3 mux failed: {result.stderr[-500:]}")
 
     # Cleanup segments
     shutil.rmtree(segments_dir, ignore_errors=True)
@@ -811,7 +811,7 @@ def _compose_concat_audio(src, dest, content_id):
     ]
     result = subprocess.run(cmd, capture_output=True, text=True, timeout=300)
     if result.returncode != 0:
-        raise RuntimeError(f"FFmpeg concat_audio failed: {result.stderr[:500]}")
+        raise RuntimeError(f"FFmpeg concat_audio failed: {result.stderr[-500:]}")
 
     os.remove(concat_list)
     return [{"filename": f"{content_id}_audio.flac", "path": output_path,
@@ -839,7 +839,7 @@ def _compose_concat_video(src, dest, content_id):
     ]
     result = subprocess.run(cmd, capture_output=True, text=True, timeout=600)
     if result.returncode != 0:
-        raise RuntimeError(f"FFmpeg concat_video failed: {result.stderr[:500]}")
+        raise RuntimeError(f"FFmpeg concat_video failed: {result.stderr[-500:]}")
 
     os.remove(concat_list)
     return [{"filename": f"{content_id}_video.mp4", "path": output_path,
@@ -866,7 +866,7 @@ def _compose_full(src, dest, content_id, config):
 
     result = subprocess.run(cmd, capture_output=True, text=True, timeout=900)
     if result.returncode != 0:
-        raise RuntimeError(f"FFmpeg full compose failed: {result.stderr[:500]}")
+        raise RuntimeError(f"FFmpeg full compose failed: {result.stderr[-500:]}")
 
     return [{"filename": f"{content_id}_final.mp4", "path": output_path,
              "size_mb": round(os.path.getsize(output_path) / 1024 / 1024, 2)}]
