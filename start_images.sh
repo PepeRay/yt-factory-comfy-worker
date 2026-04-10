@@ -63,7 +63,7 @@ except Exception as e:
 PYEOF
 fi
 
-mkdir -p /runpod-volume/jobs 2>/dev/null || true
+# NV-free post-Phase 2 — no mkdir /runpod-volume needed
 
 echo "Launching ComfyUI on port 8188..."
 cd /comfyui
