@@ -276,14 +276,13 @@ def apply_text_overlay(image_path, overlay_text, output_path, config=None):
         "(", "-size", "1280x200", "gradient:rgba(0,0,0,0.7)-rgba(0,0,0,0)",
         ")",
         "-gravity", "North", "-composite",
-        # Blurred shadow behind text for depth (80% opacity, 3px blur, +5+5 offset)
-        "(", "-clone", "0",
-        "-fill", "none",
+        # Blurred shadow behind text for depth — drawn on transparent canvas
+        # so blur affects ONLY the text, not the entire frame.
+        "(", "-size", "1280x720", "xc:transparent",
         "-font", font,
         "-pointsize", str(pointsize),
+        "-fill", "black",
         "-gravity", "North",
-        "-stroke", "black",
-        "-strokewidth", "8",
         "-annotate", "+5+85", overlay_text,
         "-blur", "0x3",
         ")",
