@@ -917,6 +917,34 @@ def _ensure_r2_inputs():
         print(f"[WARN] R2 input sync failed: {e}")
 
 
+def _ensure_img_vid_inputs(channel, content_id):
+    """Download scene images from R2 to /comfyui/input/ for img-vid jobs.
+
+    Wan 2.2 I2V workflow uses LoadImage nodes that expect files in /comfyui/input/.
+    R2 stores them under {channel}/{content_id}/source/images/scene_XXX_{initial,final}.png.
+    This function bridges that gap for img-vid job type.
+    """
+    if not R2_ENABLED:
+        return
+    input_dir = "/comfyui/input"
+    os.makedirs(input_dir, exist_ok=True)
+    r2_prefix = f"{channel}/{content_id}/source/images/"
+    try:
+        keys = r2_helper.list_files(r2_prefix)
+        downloaded = 0
+        for key in keys:
+            fname = os.path.basename(key)
+            if not fname:
+                continue
+            local_path = os.path.join(input_dir, fname)
+            if not os.path.exists(local_path):
+                r2_helper.download_file(key, local_path)
+                downloaded += 1
+        print(f"[INFO] img-vid inputs: {len(keys)} in R2, {downloaded} downloaded to {input_dir}")
+    except Exception as e:
+        print(f"[WARN] Failed to download img-vid inputs: {e}")
+
+
 def handler(job):
     """
     Video Endpoint Handler.
@@ -1000,6 +1028,11 @@ def handler(job):
     media_type = ACCEPTED_JOB_TYPES[job_type]
     dest = source_dir(channel, content_id, media_type)
 
+    # Pre-download scene images from R2 to /comfyui/input/
+    # (Wan 2.2 I2V LoadImage nodes need files in ComfyUI's default input dir)
+    if job_type == "img-vid":
+        _ensure_img_vid_inputs(channel, content_id)
+
     try:
         wait_for_comfyui()
     except RuntimeError as e:
@@ -1015,16 +1048,24 @@ def handler(job):
         return {"error": f"Failed to connect websocket: {str(e)}"}
 
     # Resolve LoadImage paths (handle naming variations: scene_000_initial.png vs scene_000_initial_000.png)
+    # ComfyUI LoadImage resolves `image` against /comfyui/input/, so we must check existence
+    # and glob against that directory — not the worker's cwd.
+    comfy_input_dir = "/comfyui/input"
     for node_id, node_data in workflow.items():
         if node_data.get("class_type") == "LoadImage":
             img_path = node_data.get("inputs", {}).get("image", "")
-            if img_path and not os.path.exists(img_path):
+            if not img_path:
+                continue
+            full_path = os.path.join(comfy_input_dir, img_path)
+            if not os.path.exists(full_path):
                 # Try glob fallback for naming variations
                 base, ext = os.path.splitext(img_path)
-                candidates = sorted(glob_module.glob(f"{base}_*{ext}"))
+                candidates = sorted(glob_module.glob(
+                    os.path.join(comfy_input_dir, f"{base}_*{ext}")
+                ))
                 if candidates:
-                    resolved = candidates[-1]  # Last = most refined
-                    node_data["inputs"]["image"] = resolved
+                    # Pass basename back to ComfyUI (it resolves against input/)
+                    node_data["inputs"]["image"] = os.path.basename(candidates[-1])
 
     try:
         prompt_id = queue_prompt(workflow, client_id)

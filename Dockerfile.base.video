@@ -145,7 +145,7 @@ RUN uv pip install comfy-aimdo torchsde comfyui-frontend-package comfy-kitchen b
 RUN uv pip install runpod requests websocket-client boto3
 
 # ── Model directory structure ───────────────────────────────
-RUN mkdir -p /comfyui/models/{diffusion_models,vae,clip,loras,text_encoders,unet,checkpoints,controlnet,upscale_models,latent_upscale_models,embeddings}
+RUN mkdir -p /comfyui/models/{diffusion_models,vae,clip,clip_vision,loras,text_encoders,unet,checkpoints,controlnet,upscale_models,latent_upscale_models,embeddings}
 
 # ── Download Wan 2.2 models (HEAVY — cached in base image) ──
 # Each model is its own RUN layer for Docker cache efficiency.
@@ -178,6 +178,10 @@ RUN wget -q --show-progress -O /comfyui/models/loras/Wan2.2-Lightning_I2V-A14B-4
 # 4x ClearReality V1 upscaler (~9 MB)
 RUN wget -q --show-progress -O /comfyui/models/upscale_models/4x-ClearRealityV1.pth \
     "https://huggingface.co/Kim2091/ClearRealityV1/resolve/main/4x-ClearRealityV1.pth"
+
+# CLIP Vision H (~1.26 GB — required by Wan 2.2 I2V CLIPVisionLoader node)
+RUN wget -q --show-progress -O /comfyui/models/clip_vision/clip_vision_h.safetensors \
+    "https://huggingface.co/Comfy-Org/Wan_2.1_ComfyUI_repackaged/resolve/main/split_files/clip_vision/clip_vision_h.safetensors"
 
 # ── Verify environment (build-time gate) ────────────────────
 # If any import fails, the build fails — no broken images pushed.
@@ -225,7 +229,8 @@ RUN test -f /comfyui/models/diffusion_models/Wan2.2-I2V-A14B-HighNoise-Q8_0.gguf
     test -f /comfyui/models/loras/Wan2.2-Lightning_I2V-A14B-4steps-lora_HIGH_fp16.safetensors && \
     test -f /comfyui/models/loras/Wan2.2-Lightning_I2V-A14B-4steps-lora_LOW_fp16.safetensors && \
     test -f /comfyui/models/upscale_models/4x-ClearRealityV1.pth && \
-    echo "=== All 7 Wan 2.2 models verified ==="
+    test -f /comfyui/models/clip_vision/clip_vision_h.safetensors && \
+    echo "=== All 8 Wan 2.2 models verified ==="
 
 # ── Clear HF token (don't bake into final image) ──────────
 ENV HF_TOKEN=
