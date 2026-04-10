@@ -271,7 +271,7 @@ def apply_text_overlay(image_path, overlay_text, output_path, config=None):
     # Avoids YouTube timestamp (bottom-right) and progress bar (bottom)
     cmd = [
         "convert", image_path,
-        "-resize", "1280x720!",
+        "-resize", "1280x720^", "-gravity", "center", "-extent", "1280x720",
         # Semi-transparent dark gradient behind text for "oasis of contrast"
         "(", "-size", "1280x200", "gradient:rgba(0,0,0,0.7)-rgba(0,0,0,0)",
         ")",
