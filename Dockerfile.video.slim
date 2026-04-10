@@ -1,0 +1,30 @@
+# === YouTube Factory — Video Endpoint (slim CI/CD layer) ===
+# Base image contains: ComfyUI + custom nodes + ALL Wan 2.2 models + Python deps
+# This layer only adds: handler code + startup script
+# Build time: ~2 min (vs ~2-3 h with full Dockerfile.base.video)
+#
+# Rebuild triggers (via .github/workflows/build-split.yml):
+#   - handler_video.py
+#   - start_video.sh
+#   - r2_helper.py
+#   - download_r2_inputs.py
+#   - Dockerfile.video.slim itself
+#
+# For rebuilds of the base image (models, custom nodes, deps):
+#   manually dispatch build-base.yml with target=video.
+
+FROM ghcr.io/peperay/yt-factory-video-base:v1
+
+# ── Handler code (changes frequently) ──
+COPY r2_helper.py /r2_helper.py
+COPY download_r2_inputs.py /download_r2_inputs.py
+COPY handler_video.py /handler.py
+COPY start_video.sh /start.sh
+RUN chmod +x /start.sh
+
+ENV RUNPOD_NETWORK_VOLUME_PATH="/runpod-volume"
+
+CMD ["/start.sh"]
+
+LABEL description="YT Factory Video Slim — handler over yt-factory-video-base:v1"
+LABEL version="v1"
