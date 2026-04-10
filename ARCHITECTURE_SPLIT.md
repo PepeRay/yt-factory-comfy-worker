@@ -2,16 +2,16 @@
 
 ## Por qué el split
 
-El handler monolítico carga TODOS los modelos (Flux, VibeVoice, Whisper, LTX-Video) en un solo worker.
+El handler monolítico carga TODOS los modelos (Flux, TTS, Whisper, video) en un solo worker.
 Problema: cada cold start paga el costo de cargar modelos que no necesita. Un job de TTS no necesita Flux.
 
 ## Los 3 endpoints
 
-| Endpoint | Job Types | Modelos | GPU recomendada | Dockerfile |
-|----------|-----------|---------|-----------------|------------|
-| **Audio** | `txt-voice`, `voice-srt` | VibeVoice, Whisper | RTX 4000 Ada (20GB) | `Dockerfile.audio` |
-| **Images** | `txt-img` | Flux 2 Klein, LoRAs | RTX 4000 Ada (20GB) | `Dockerfile.images` |
-| **Video** | `img-vid`, `compose` | LTX-Video 2.3, FFmpeg | RTX 6000 Ada (48GB) | `Dockerfile.video` |
+| Endpoint | Job Types | Modelos | GPU recomendada | Dockerfile (CI/CD) | Dockerfile (base) |
+|----------|-----------|---------|-----------------|--------------------|-------------------|
+| **Audio** | `txt-voice`, `voice-srt` | Qwen3-TTS, CosyVoice3, Whisper | RTX 4000 Ada (20GB) | `Dockerfile.audio` | `Dockerfile.base.audio` |
+| **Images** | `txt-img` | Flux 2 Klein, LoRAs | RTX 4000 Ada (20GB) | `Dockerfile.images` | `Dockerfile.base.images` |
+| **Video** | `img-vid`, `compose` | Wan 2.2 I2V, FFmpeg | RTX 6000 Ada (48GB) | — (base-only) | `Dockerfile.base.video` |
 
 ## Estructura de archivos
 
@@ -22,9 +22,11 @@ serverless/
 ├── handler_images.py       # Solo image jobs
 ├── handler_video.py        # Video + compose jobs
 ├── Dockerfile              # Monolítico (legacy)
-├── Dockerfile.audio        # Solo nodos de audio
-├── Dockerfile.images       # Solo nodos de imagen
-├── Dockerfile.video        # Solo nodos de video
+├── Dockerfile.audio        # CI/CD layer audio (FROM base.audio)
+├── Dockerfile.images       # CI/CD layer images (FROM base.images)
+├── Dockerfile.base.audio   # Base audio con modelos (rebuild manual)
+├── Dockerfile.base.images  # Base images con modelos (rebuild manual)
+├── Dockerfile.base.video   # Base video con modelos Wan 2.2 (rebuild manual)
 ├── start.sh                # Compartido (parametrizable)
 ├── start_audio.sh          # Whitelist solo audio nodes
 ├── start_images.sh         # Sin whitelist (todo en Docker)
@@ -37,9 +39,10 @@ serverless/
 Cada endpoint en RunPod console:
 - **yt-factory-audio** → Docker image: `peperay/yt-factory-audio:latest`
 - **yt-factory-images** → Docker image: `peperay/yt-factory-images:latest`
-- **yt-factory-video** → Docker image: `peperay/yt-factory-video:latest`
+- **yt-factory-video** → Docker image: `peperay/yt-factory-video-base:v1` (base-only, sin CI/CD layer)
 
-Todos comparten el mismo Network Volume (`29swi0udsr`) para modelos.
+Post-migracion Phase 2: los modelos viven DENTRO de las imagenes base (no en Network Volume).
+El Network Volume `29swi0udsr` fue eliminado — cold starts ahora dependen 100% del pull de imagen.
 
 ## Ahorro estimado
 

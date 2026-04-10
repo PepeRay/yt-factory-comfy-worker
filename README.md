@@ -1,7 +1,7 @@
 # YouTube Factory — ComfyUI Serverless Worker
 
 Worker de RunPod Serverless para la YouTube Factory.
-Custom build con soporte para audio (VibeVoice, Whisper) + video (LTX-Video).
+Custom build con soporte para audio (Qwen3-TTS, CosyVoice3, Whisper), imagen (Flux 2 Klein) y video (Wan 2.2).
 
 ## Arquitectura
 
@@ -107,7 +107,7 @@ Test workflows disponibles:
 ```
 /runpod-volume/
   ComfyUI/
-    models/           ← Todos los modelos (Flux, LTX, VibeVoice, Whisper)
+    models/           ← Legacy (post-migracion Phase 2 los modelos viven dentro de las imagenes base)
     custom_nodes/     ← Solo whitelisted: VibeVoice, TTS-Audio-Suite, RES4LYF
     input/            ← Archivos de referencia (Voz_Dominion.wav, etc.)
     output/           ← Output default de ComfyUI

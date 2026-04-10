@@ -21,7 +21,6 @@ jobs:
     outputs:
       audio: ${{ steps.filter.outputs.audio }}
       images: ${{ steps.filter.outputs.images }}
-      video: ${{ steps.filter.outputs.video }}
       shared: ${{ steps.filter.outputs.shared }}
     steps:
       - uses: actions/checkout@v4
@@ -38,11 +37,6 @@ jobs:
               - 'Dockerfile.images'
               - 'handler_images.py'
               - 'start_images.sh'
-              - 'r2_helper.py'
-            video:
-              - 'Dockerfile.video'
-              - 'handler_video.py'
-              - 'start_video.sh'
               - 'r2_helper.py'
             shared:
               - 'extra_model_paths.yaml'
@@ -113,43 +107,10 @@ jobs:
           cache-from: type=gha,scope=images
           cache-to: type=gha,mode=max,scope=images
 
-  build-video:
-    needs: changes
-    if: >-
-      github.event_name == 'workflow_dispatch' &&
-      (github.event.inputs.target == 'all' || github.event.inputs.target == 'video') ||
-      github.event_name == 'push' &&
-      (needs.changes.outputs.video == 'true' || needs.changes.outputs.shared == 'true')
-    runs-on: ubuntu-latest
-    permissions:
-      contents: read
-      packages: write
-    steps:
-      - uses: actions/checkout@v4
-
-      - uses: docker/login-action@v3
-        with:
-          registry: ghcr.io
-          username: ${{ github.actor }}
-          password: ${{ secrets.GITHUB_TOKEN }}
-
-      - uses: docker/setup-buildx-action@v3
-
-      - uses: docker/build-push-action@v6
-        with:
-          context: .
-          file: Dockerfile.video
-          push: true
-          tags: |
-            ${{ env.IMAGE_PREFIX }}-video:latest
-            ${{ env.IMAGE_PREFIX }}-video:${{ github.sha }}
-          cache-from: type=gha,scope=video
-          cache-to: type=gha,mode=max,scope=video
-
   update-runpod:
     # DISABLED: RunPod templates now point to base images (built via build-base.yml)
     # The CI/CD images here don't have models baked in. Don't overwrite the templates.
-    needs: [build-audio, build-images, build-video]
+    needs: [build-audio, build-images]
     if: false
     runs-on: ubuntu-latest
     steps:
@@ -184,10 +145,6 @@ jobs:
 
           if [ "${{ needs.build-images.result }}" == "success" ]; then
             update_template "7y8167cpbf" "yt-factory-images" "${PREFIX}-images:${SHA}"
-          fi
-
-          if [ "${{ needs.build-video.result }}" == "success" ]; then
-            update_template "5ejm0u3xrt" "yt-factory-video" "${PREFIX}-video:${SHA}"
           fi
 
           echo "=== RunPod templates updated (SHA: ${SHA}) ==="
