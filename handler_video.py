@@ -401,8 +401,48 @@ def _compose_scene_manifest(src, dest, content_id, config, channel, platform="yo
                     print(f"WARN: scene {sid} video_clip missing {clip_path}, falling back to ken_burns")
                     render_type = "ken_burns"
                 else:
-                    cmd = f"ffmpeg -y -i {clip_path} {NORM} {seg_path}"
-                    result = subprocess.run(cmd.split(), capture_output=True, text=True, timeout=120)
+                    # Probe real clip duration. Wan 2.2 I2V emits exactly 5.0625s
+                    # (81 frames @ 16fps) but Scene Director assigns target
+                    # duration_sec from Whisper SRT timestamps (e.g. 5.26s, 6.7s).
+                    # Mismatch causes cumulative audio/video drift — pad with
+                    # freeze frame (or trim if longer) to match target exactly.
+                    target_dur = float(duration)
+                    try:
+                        clip_real_dur = _get_video_duration(clip_path)
+                    except Exception as e:
+                        print(f"WARN: scene {sid} ffprobe failed ({e}), assuming clip matches target")
+                        clip_real_dur = target_dur
+                    delta = target_dur - clip_real_dur
+
+                    # Base normalization args (as list to allow injecting filters)
+                    norm_args = [
+                        "-vf",
+                        f"scale={WIDTH}:{HEIGHT}:force_original_aspect_ratio=increase,"
+                        f"crop={WIDTH}:{HEIGHT},setsar=1",
+                        "-r", str(FPS),
+                        "-c:v", "libx264", "-preset", "fast", "-crf", "26",
+                        "-pix_fmt", "yuv420p", "-an",
+                    ]
+
+                    if delta > 0.05:
+                        # Pad with freeze frame of last frame for delta seconds.
+                        # Combine scale/crop with tpad in a single -vf chain.
+                        norm_args[1] = (
+                            f"scale={WIDTH}:{HEIGHT}:force_original_aspect_ratio=increase,"
+                            f"crop={WIDTH}:{HEIGHT},setsar=1,"
+                            f"tpad=stop_mode=clone:stop_duration={delta:.4f}"
+                        )
+                        cmd = ["ffmpeg", "-y", "-i", clip_path] + norm_args + [seg_path]
+                        print(f"[video_clip sid={sid}] pad +{delta:.4f}s (real={clip_real_dur:.4f} target={target_dur:.4f})")
+                    elif delta < -0.05:
+                        # Clip longer than target — trim to target_dur.
+                        cmd = ["ffmpeg", "-y", "-i", clip_path] + norm_args + ["-t", f"{target_dur:.4f}", seg_path]
+                        print(f"[video_clip sid={sid}] trim to {target_dur:.4f}s (real={clip_real_dur:.4f})")
+                    else:
+                        # Within 50ms tolerance — normalize as-is.
+                        cmd = ["ffmpeg", "-y", "-i", clip_path] + norm_args + [seg_path]
+
+                    result = subprocess.run(cmd, capture_output=True, text=True, timeout=180)
                     if result.returncode != 0:
                         raise RuntimeError(f"segment {sid} video_clip: {result.stderr[-200:]}")
                     # Extract ambient audio from video clip (best effort)
@@ -717,7 +757,7 @@ def _compose_scene_manifest(src, dest, content_id, config, channel, platform="yo
         filter_parts.append(f"[{narr_idx}:a]volume=1.0[narr]")
         audio_inputs.append("[narr]")
     if music_idx is not None:
-        filter_parts.append(f"[{music_idx}:a]volume=0.12[music]")
+        filter_parts.append(f"[{music_idx}:a]volume=0.20[music]")
         audio_inputs.append("[music]")
     if amb_idx is not None:
         # Ambient disabled — video models generate full clips with audio handled separately
