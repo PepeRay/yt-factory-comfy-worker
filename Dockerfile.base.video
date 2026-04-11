@@ -54,15 +54,15 @@ RUN grep -v -i -E '^(torch==|torch>=|torch<=|torchvision==|torchvision>=|torchau
 # ── Custom Nodes: VIDEO ONLY ────────────────────────────────
 # ComfyUI >= v0.3.47 does NOT ship ComfyUI-Manager, so `comfy node install`
 # silently fails with "cm-cli not available". Use direct git clone instead.
-# Nodes used by Wan 2.2 ULTRA workflow and shared utilities:
-#   UnetLoaderGGUF, DualCLIPLoaderGGUF → comfyui-gguf
+# Nodes used by Wan 2.2 workflow and shared utilities:
+#   UnetLoaderGGUF, CLIPLoaderGGUF → comfyui-gguf
 #   VHS_VideoCombine → comfyui-videohelpersuite
-#   VAELoaderKJ, ResizeImagesByLongerEdge, ImageResizeKJv2 → comfyui-kjnodes
-#   MathExpression|pysssss → comfyui-custom-scripts
-#   Power Lora Loader, Any Switch → rgthree-comfy
-#   CM_IntToFloat → comfymath
-#   easy cleanGpuUsed, easy clearCacheAll → comfyui-easy-use (VRAM cleanup mid-pipeline)
-#   Frames Slice → RES4LYF
+#   Power Lora Loader (rgthree) → rgthree-comfy
+# kjnodes/custom-scripts/comfymath/easy-use bakeados por herencia del pipeline LTX
+# legacy — el workflow n8n actual (o2FsjSmuVUIk5qb3) no los usa. Pendiente de
+# limpieza en commit separado (ver backlog en Arquitectura Técnica.md).
+# RES4LYF removido 2026-04-11: huérfano de LTX legacy, no aparece en el workflow
+# actual, e importa `comfy.nested_tensor` que no existe en ComfyUI v0.3.47.
 RUN cd /comfyui/custom_nodes && set -e && \
     for repo in \
       "https://github.com/Kosinkadink/ComfyUI-VideoHelperSuite.git" \
@@ -87,24 +87,6 @@ RUN cd /comfyui/custom_nodes && set -e && \
       test -f "$name/__init__.py" || { echo "ERROR: $name missing __init__.py"; exit 1; }; \
     done && \
     echo "=== 7 video custom nodes installed ==="
-
-# RES4LYF — git clone + install deps (was NV-only, now baked)
-# Retry logic for CI/CD resilience
-RUN cd /comfyui/custom_nodes && \
-    for attempt in 1 2 3; do \
-      echo "=== RES4LYF clone attempt $attempt/3 ===" && \
-      git clone --depth 1 https://github.com/ClownsharkBatwing/RES4LYF.git && \
-      break || \
-      { echo "WARN: RES4LYF clone attempt $attempt failed"; [ $attempt -lt 3 ] && sleep 5; }; \
-    done && \
-    test -d RES4LYF && \
-    cd RES4LYF && \
-    if [ -f requirements.txt ]; then \
-        grep -v -i -E '^(torch==|torch>=|torchvision|torchaudio|nvidia)' requirements.txt > /tmp/res4lyf_reqs.txt && \
-        uv pip install -r /tmp/res4lyf_reqs.txt && \
-        rm /tmp/res4lyf_reqs.txt; \
-    fi && \
-    echo "=== RES4LYF installed ==="
 
 WORKDIR /
 
@@ -212,7 +194,14 @@ print(f'torch={torch.__version__}, numpy={numpy.__version__}, transformers={tran
 print('=== Video endpoint environment verified ===')"
 
 # ── Verify custom nodes (build-time gate) ───────────────────
-RUN for node in \
+# Hardened 2026-04-11: ejecuta un import real de cada custom node (igual
+# que hace ComfyUI al arrancar) en vez de solo verificar que el archivo
+# `__init__.py` exista. Un `test -f` deja pasar incompatibilidades runtime
+# como `ModuleNotFoundError: comfy.nested_tensor` (incidente RES4LYF /
+# ComfyUI v0.3.47). Si un custom node no puede cargarse, el build falla
+# aquí — no en producción.
+COPY verify_custom_nodes.py /tmp/verify_custom_nodes.py
+RUN python /tmp/verify_custom_nodes.py \
       ComfyUI-VideoHelperSuite \
       ComfyUI-KJNodes \
       ComfyUI-Custom-Scripts \
@@ -220,11 +209,8 @@ RUN for node in \
       rgthree-comfy \
       ComfyMath \
       ComfyUI-Easy-Use \
-      RES4LYF \
-    ; do \
-      test -f "/comfyui/custom_nodes/$node/__init__.py" || { echo "ERROR: $node missing"; exit 1; }; \
-    done && \
-    echo "=== 8 custom nodes verified ==="
+    && rm /tmp/verify_custom_nodes.py \
+    && echo "=== 7 custom nodes verified (import-level) ==="
 
 # ── Verify Wan 2.2 models (build-time gate) ─────────────────
 RUN test -f /comfyui/models/diffusion_models/Wan2.2-I2V-A14B-HighNoise-Q8_0.gguf && \
