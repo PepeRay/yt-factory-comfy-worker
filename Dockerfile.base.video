@@ -52,6 +52,8 @@ RUN grep -v -i -E '^(torch==|torch>=|torch<=|torchvision==|torchvision>=|torchau
     rm /tmp/reqs_no_torch.txt
 
 # ── Custom Nodes: VIDEO ONLY ────────────────────────────────
+# ComfyUI >= v0.3.47 does NOT ship ComfyUI-Manager, so `comfy node install`
+# silently fails with "cm-cli not available". Use direct git clone instead.
 # Nodes used by Wan 2.2 ULTRA workflow and shared utilities:
 #   UnetLoaderGGUF, DualCLIPLoaderGGUF → comfyui-gguf
 #   VHS_VideoCombine → comfyui-videohelpersuite
@@ -61,13 +63,30 @@ RUN grep -v -i -E '^(torch==|torch>=|torch<=|torchvision==|torchvision>=|torchau
 #   CM_IntToFloat → comfymath
 #   easy cleanGpuUsed, easy clearCacheAll → comfyui-easy-use (VRAM cleanup mid-pipeline)
 #   Frames Slice → RES4LYF
-RUN comfy node install comfyui-videohelpersuite || true && \
-    comfy node install comfyui-kjnodes || true && \
-    comfy node install comfyui-custom-scripts || true && \
-    comfy node install comfyui-gguf || true && \
-    comfy node install rgthree-comfy || true && \
-    comfy node install comfymath || true && \
-    comfy node install comfyui-easy-use || true
+RUN cd /comfyui/custom_nodes && set -e && \
+    for repo in \
+      "https://github.com/Kosinkadink/ComfyUI-VideoHelperSuite.git" \
+      "https://github.com/kijai/ComfyUI-KJNodes.git" \
+      "https://github.com/pythongosssss/ComfyUI-Custom-Scripts.git" \
+      "https://github.com/city96/ComfyUI-GGUF.git" \
+      "https://github.com/rgthree/rgthree-comfy.git" \
+      "https://github.com/evanspearman/ComfyMath.git" \
+      "https://github.com/yolain/ComfyUI-Easy-Use.git" \
+    ; do \
+      name=$(basename "$repo" .git); \
+      echo "=== Cloning $name ==="; \
+      for attempt in 1 2 3; do \
+        git clone --depth 1 "$repo" "$name" && break || \
+        { echo "WARN: $name clone attempt $attempt failed"; [ $attempt -lt 3 ] && sleep 5 || exit 1; }; \
+      done; \
+      if [ -f "$name/requirements.txt" ]; then \
+        grep -v -i -E '^(torch==|torch>=|torchvision|torchaudio|nvidia)' "$name/requirements.txt" > /tmp/node_reqs.txt && \
+        uv pip install -r /tmp/node_reqs.txt && \
+        rm /tmp/node_reqs.txt; \
+      fi; \
+      test -f "$name/__init__.py" || { echo "ERROR: $name missing __init__.py"; exit 1; }; \
+    done && \
+    echo "=== 7 video custom nodes installed ==="
 
 # RES4LYF — git clone + install deps (was NV-only, now baked)
 # Retry logic for CI/CD resilience
@@ -193,9 +212,19 @@ print(f'torch={torch.__version__}, numpy={numpy.__version__}, transformers={tran
 print('=== Video endpoint environment verified ===')"
 
 # ── Verify custom nodes (build-time gate) ───────────────────
-RUN test -d /comfyui/custom_nodes/RES4LYF && \
-    test -f /comfyui/custom_nodes/RES4LYF/__init__.py && \
-    echo "=== RES4LYF custom node verified ==="
+RUN for node in \
+      ComfyUI-VideoHelperSuite \
+      ComfyUI-KJNodes \
+      ComfyUI-Custom-Scripts \
+      ComfyUI-GGUF \
+      rgthree-comfy \
+      ComfyMath \
+      ComfyUI-Easy-Use \
+      RES4LYF \
+    ; do \
+      test -f "/comfyui/custom_nodes/$node/__init__.py" || { echo "ERROR: $node missing"; exit 1; }; \
+    done && \
+    echo "=== 8 custom nodes verified ==="
 
 # ── Verify Wan 2.2 models (build-time gate) ─────────────────
 RUN test -f /comfyui/models/diffusion_models/Wan2.2-I2V-A14B-HighNoise-Q8_0.gguf && \
