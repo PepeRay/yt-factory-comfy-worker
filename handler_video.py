@@ -58,6 +58,116 @@ ACCEPTED_JOB_TYPES = {
     "img-vid": "video",
 }
 
+# ── NVENC encoder args (GPU hardware encoding) ────────────────
+# Migrated from libx264 software encoding to h264_nvenc to leverage the
+# RTX 4090 GPU that sits idle during compose. Expected cost reduction:
+# ~$0.40 → ~$0.05-0.10 per compose.
+#
+# NVENC preset mapping (p1=fastest → p7=slowest/best quality).
+# p5 + -tune hq ≈ libx264 fast/medium perceptual quality.
+# -cq is constant-quality (equivalent to libx264 -crf). cq 19 ≈ crf 18.
+NVENC_HQ_ARGS = [
+    "-c:v", "h264_nvenc",
+    "-preset", "p5",
+    "-tune", "hq",
+    "-rc", "vbr",
+    "-cq", "19",
+    "-b:v", "0",
+    "-pix_fmt", "yuv420p",
+    "-profile:v", "high",
+    "-spatial-aq", "1",
+    "-temporal-aq", "1",
+]
+
+# Lower-quality preset for video clip normalization (replaces libx264 crf 26).
+# cq 23 ≈ crf 26 for the Wan 2.2 clip re-encode path.
+NVENC_NORM_ARGS = [
+    "-c:v", "h264_nvenc",
+    "-preset", "p5",
+    "-tune", "hq",
+    "-rc", "vbr",
+    "-cq", "23",
+    "-b:v", "0",
+    "-pix_fmt", "yuv420p",
+]
+
+# libx264 fallback equivalents (used only when NVENC is unavailable).
+_X264_HQ_FALLBACK = [
+    "-c:v", "libx264", "-preset", "fast", "-crf", "18", "-pix_fmt", "yuv420p",
+]
+_X264_NORM_FALLBACK = [
+    "-c:v", "libx264", "-preset", "fast", "-crf", "26", "-pix_fmt", "yuv420p",
+]
+
+# Stderr markers that indicate NVENC is not usable on this host (cold start,
+# driver mismatch, etc.). On match, we retry the command with libx264.
+_NVENC_FAILURE_MARKERS = (
+    "nvenc",
+    "No NVENC capable devices",
+    "Cannot load nvcuda",
+    "CUDA_ERROR",
+    "encoder not found",
+    "Unknown encoder 'h264_nvenc'",
+)
+
+
+def _swap_nvenc_for_x264(cmd):
+    """Return a new cmd list with h264_nvenc args replaced by libx264 equivalents.
+    Handles both HQ and NORM presets by detecting the -cq value."""
+    new_cmd = []
+    i = 0
+    # Quick pass: find the NVENC block bounds (from "-c:v" "h264_nvenc" to
+    # the last NVENC-specific flag). We do a token-by-token rewrite: any
+    # occurrence of "h264_nvenc" triggers replacement of the surrounding
+    # encoder flags with the libx264 equivalent.
+    #
+    # Strategy: copy tokens through, but when we see -c:v h264_nvenc, skip
+    # all encoder-related flags that follow and splice in the x264 fallback.
+    nvenc_encoder_flags = {
+        "-c:v", "-preset", "-tune", "-rc", "-cq", "-b:v",
+        "-pix_fmt", "-profile:v", "-spatial-aq", "-temporal-aq",
+        "-rc-lookahead", "-bf",
+    }
+    # Detect whether this command uses HQ or NORM by scanning for cq value
+    fallback = _X264_HQ_FALLBACK
+    try:
+        cq_idx = cmd.index("-cq")
+        if cmd[cq_idx + 1] == "23":
+            fallback = _X264_NORM_FALLBACK
+    except (ValueError, IndexError):
+        pass
+
+    swapped = False
+    while i < len(cmd):
+        tok = cmd[i]
+        if not swapped and tok == "-c:v" and i + 1 < len(cmd) and cmd[i + 1] == "h264_nvenc":
+            new_cmd.extend(fallback)
+            i += 2
+            # Skip any subsequent NVENC encoder flags (they come in -flag value pairs)
+            while i < len(cmd) and cmd[i] in nvenc_encoder_flags:
+                # Skip flag + value
+                i += 2
+            swapped = True
+            continue
+        new_cmd.append(tok)
+        i += 1
+    return new_cmd
+
+
+def _run_ffmpeg_with_nvenc_fallback(cmd, *, timeout=180, label="ffmpeg"):
+    """Run an ffmpeg command that uses NVENC; on NVENC-specific failure, retry
+    once with libx264. Returns the CompletedProcess of the (possibly retried)
+    invocation. Caller still inspects returncode for other errors."""
+    result = subprocess.run(cmd, capture_output=True, text=True, timeout=timeout)
+    if result.returncode == 0:
+        return result
+    stderr_lc = (result.stderr or "").lower()
+    if any(marker.lower() in stderr_lc for marker in _NVENC_FAILURE_MARKERS):
+        fallback_cmd = _swap_nvenc_for_x264(cmd)
+        print(f"[{label}] NVENC unavailable, falling back to libx264")
+        result = subprocess.run(fallback_cmd, capture_output=True, text=True, timeout=timeout)
+    return result
+
 def free_vram():
     """Call ComfyUI /free endpoint to unload models and release VRAM/RAM between jobs."""
     try:
@@ -319,10 +429,9 @@ def _pad_segment_to_duration(seg_path, out_path, pad_duration, width, height, fp
         "ffmpeg", "-y", "-i", seg_path,
         "-vf", vf,
         "-r", str(fps),
-        "-c:v", "libx264", "-preset", "fast", "-crf", "26",
-        "-pix_fmt", "yuv420p", "-an", out_path,
+        *NVENC_NORM_ARGS, "-an", out_path,
     ]
-    result = subprocess.run(cmd, capture_output=True, text=True, timeout=180)
+    result = _run_ffmpeg_with_nvenc_fallback(cmd, timeout=180, label="pad_segment")
     if result.returncode != 0:
         raise RuntimeError(f"pad segment failed: {result.stderr[-200:]}")
     return out_path
@@ -399,15 +508,14 @@ def _zoompan_chain(z_expr, x_expr, y_expr, frames, w, h, fps):
 
 def _run_single_image_effect(img_path, filter_complex, duration, seg_path):
     """Run ffmpeg for a single-image effect. Centralized so every effect
-    uses the same encoder flags (h264 yuv420p, preset fast, crf 18)."""
+    uses the same encoder flags (h264_nvenc HQ preset, yuv420p)."""
     cmd = [
         "ffmpeg", "-y", "-loop", "1", "-i", img_path,
         "-filter_complex", filter_complex,
         "-t", f"{duration:.4f}",
-        "-c:v", "libx264", "-preset", "fast", "-crf", "18",
-        "-pix_fmt", "yuv420p", "-an", seg_path,
+        *NVENC_HQ_ARGS, "-an", seg_path,
     ]
-    result = subprocess.run(cmd, capture_output=True, text=True, timeout=180)
+    result = _run_ffmpeg_with_nvenc_fallback(cmd, timeout=180, label="effect")
     if result.returncode != 0:
         raise RuntimeError(f"effect render failed: {result.stderr[-300:]}")
     return seg_path
@@ -586,11 +694,10 @@ def _render_parallax(img_fg, img_bg, duration, seg_path, w, h, fps):
         "-loop", "1", "-i", img_bg,
         "-filter_complex", fc,
         "-t", f"{duration:.4f}", "-r", str(fps),
-        "-c:v", "libx264", "-preset", "fast", "-crf", "18",
-        "-pix_fmt", "yuv420p", "-an", seg_path,
+        *NVENC_HQ_ARGS, "-an", seg_path,
     ]
     print(f"[effect] parallax d={duration:.2f}s (fg={os.path.basename(img_fg)} bg={os.path.basename(img_bg)})")
-    result = subprocess.run(cmd, capture_output=True, text=True, timeout=180)
+    result = _run_ffmpeg_with_nvenc_fallback(cmd, timeout=180, label="parallax")
     if result.returncode != 0:
         raise RuntimeError(f"parallax render failed: {result.stderr[-300:]}")
     return seg_path
@@ -613,11 +720,10 @@ def _render_match_cut(img_a, img_b, duration, seg_path, w, h, fps):
         "-loop", "1", "-i", img_b,
         "-filter_complex", fc, "-map", "[v]",
         "-t", f"{duration:.4f}", "-r", str(fps),
-        "-c:v", "libx264", "-preset", "fast", "-crf", "18",
-        "-pix_fmt", "yuv420p", "-an", seg_path,
+        *NVENC_HQ_ARGS, "-an", seg_path,
     ]
     print(f"[effect] match_cut d={duration:.2f}s (a={os.path.basename(img_a)} b={os.path.basename(img_b)})")
-    result = subprocess.run(cmd, capture_output=True, text=True, timeout=180)
+    result = _run_ffmpeg_with_nvenc_fallback(cmd, timeout=180, label="match_cut")
     if result.returncode != 0:
         raise RuntimeError(f"match_cut render failed: {result.stderr[-300:]}")
     return seg_path
@@ -644,11 +750,10 @@ def _render_particles(img_path, particles_path, duration, seg_path, w, h, fps):
         "-stream_loop", "-1", "-i", particles_path,
         "-filter_complex", fc,
         "-t", f"{duration:.4f}", "-r", str(fps),
-        "-c:v", "libx264", "-preset", "fast", "-crf", "18",
-        "-pix_fmt", "yuv420p", "-an", seg_path,
+        *NVENC_HQ_ARGS, "-an", seg_path,
     ]
     print(f"[effect] particles d={duration:.2f}s")
-    result = subprocess.run(cmd, capture_output=True, text=True, timeout=180)
+    result = _run_ffmpeg_with_nvenc_fallback(cmd, timeout=180, label="particles")
     if result.returncode != 0:
         raise RuntimeError(f"particles render failed: {result.stderr[-300:]}")
     return seg_path
@@ -686,7 +791,9 @@ def _compose_scene_manifest(src, dest, content_id, config, channel, platform="yo
     os.makedirs(segments_dir, exist_ok=True)
 
     _gen_w, _gen_h, WIDTH, HEIGHT, FPS = PLATFORM_FORMATS.get(platform, DEFAULT_FORMAT)
-    NORM = f"-vf scale={WIDTH}:{HEIGHT}:force_original_aspect_ratio=increase,crop={WIDTH}:{HEIGHT},setsar=1 -r {FPS} -c:v libx264 -preset fast -crf 26 -pix_fmt yuv420p -an"
+    # NOTE: NORM string is unused (kept for backwards reference). Actual
+    # normalization uses the NVENC_NORM_ARGS list built inline below.
+    NORM = f"-vf scale={WIDTH}:{HEIGHT}:force_original_aspect_ratio=increase,crop={WIDTH}:{HEIGHT},setsar=1 -r {FPS} -c:v h264_nvenc -preset p5 -tune hq -rc vbr -cq 23 -b:v 0 -pix_fmt yuv420p -an"
 
     # Directory for extracted ambient audio from video clips
     ambient_dir = os.path.join(segments_dir, "_ambient")
@@ -750,14 +857,14 @@ def _compose_scene_manifest(src, dest, content_id, config, channel, platform="yo
                         clip_real_dur = target_dur
                     delta = target_dur - clip_real_dur
 
-                    # Base normalization args (as list to allow injecting filters)
+                    # Base normalization args (as list to allow injecting filters).
+                    # Uses NVENC_NORM_ARGS (cq 23 ≈ libx264 crf 26).
                     norm_args = [
                         "-vf",
                         f"scale={WIDTH}:{HEIGHT}:force_original_aspect_ratio=increase,"
                         f"crop={WIDTH}:{HEIGHT},setsar=1",
                         "-r", str(FPS),
-                        "-c:v", "libx264", "-preset", "fast", "-crf", "26",
-                        "-pix_fmt", "yuv420p", "-an",
+                        *NVENC_NORM_ARGS, "-an",
                     ]
 
                     if delta > 0.05:
@@ -778,7 +885,7 @@ def _compose_scene_manifest(src, dest, content_id, config, channel, platform="yo
                         # Within 50ms tolerance — normalize as-is.
                         cmd = ["ffmpeg", "-y", "-i", clip_path] + norm_args + [seg_path]
 
-                    result = subprocess.run(cmd, capture_output=True, text=True, timeout=180)
+                    result = _run_ffmpeg_with_nvenc_fallback(cmd, timeout=180, label=f"video_clip_norm sid={sid}")
                     if result.returncode != 0:
                         raise RuntimeError(f"segment {sid} video_clip: {result.stderr[-200:]}")
                     # Extract ambient audio from video clip (best effort)
@@ -813,10 +920,9 @@ def _compose_scene_manifest(src, dest, content_id, config, channel, platform="yo
                         f"[1:v]scale={WIDTH}:{HEIGHT},setsar=1,format=yuv420p[b];"
                         f"[a][b]blend=all_expr='A*(1-T/{duration})+B*(T/{duration})':shortest=1",
                         "-t", str(duration), "-r", str(FPS),
-                        "-c:v", "libx264", "-preset", "fast", "-crf", "18",
-                        "-pix_fmt", "yuv420p", seg_path
+                        *NVENC_HQ_ARGS, seg_path
                     ]
-                    result = subprocess.run(cmd, capture_output=True, text=True, timeout=120)
+                    result = _run_ffmpeg_with_nvenc_fallback(cmd, timeout=120, label=f"crossfade sid={sid}")
                     if result.returncode != 0:
                         raise RuntimeError(f"segment {sid} crossfade: {result.stderr[-200:]}")
                     # Generate silence for non-video scenes
@@ -960,13 +1066,12 @@ def _compose_scene_manifest(src, dest, content_id, config, channel, platform="yo
                 print(f"WARN: concat {i} failed, trying re-encode")
                 cmd = [
                     "ffmpeg", "-y", "-f", "concat", "-safe", "0",
-                    "-i", concat_list, "-c:v", "libx264", "-preset", "fast",
-                    "-crf", "18", concat_out
+                    "-i", concat_list, *NVENC_HQ_ARGS, concat_out
                 ]
                 # Recreate concat list for retry
                 with open(concat_list, "w") as f:
                     f.write(f"file '{merged_path}'\nfile '{seg['path']}'\n")
-                result = subprocess.run(cmd, capture_output=True, text=True, timeout=300)
+                result = _run_ffmpeg_with_nvenc_fallback(cmd, timeout=300, label=f"concat_reencode {i}")
                 os.remove(concat_list)
             merged_path = concat_out
         else:
@@ -985,10 +1090,9 @@ def _compose_scene_manifest(src, dest, content_id, config, channel, platform="yo
                 "ffmpeg", "-y", "-i", merged_path, "-i", seg["path"],
                 "-filter_complex",
                 f"[0:v][1:v]xfade=transition={xfade_name}:duration={t_dur}:offset={offset}",
-                "-c:v", "libx264", "-preset", "fast", "-crf", "18",
-                "-pix_fmt", "yuv420p", xfade_out
+                *NVENC_HQ_ARGS, xfade_out
             ]
-            result = subprocess.run(cmd, capture_output=True, text=True, timeout=300)
+            result = _run_ffmpeg_with_nvenc_fallback(cmd, timeout=300, label=f"xfade {xfade_name}")
             if result.returncode != 0:
                 print(f"WARN: xfade {transition} failed at scene {scene['scene_id']}, falling back to cut")
                 # Fallback to concat
@@ -1015,10 +1119,9 @@ def _compose_scene_manifest(src, dest, content_id, config, channel, platform="yo
                     "ffmpeg", "-y", "-i", merged_path,
                     "-vf", f"tpad=stop_mode=clone:stop_duration={delta_total:.4f}",
                     "-r", str(FPS),
-                    "-c:v", "libx264", "-preset", "fast", "-crf", "18",
-                    "-pix_fmt", "yuv420p", "-an", safety_out,
+                    *NVENC_HQ_ARGS, "-an", safety_out,
                 ]
-                result = subprocess.run(cmd, capture_output=True, text=True, timeout=600)
+                result = _run_ffmpeg_with_nvenc_fallback(cmd, timeout=600, label="phase2.5_safety")
                 if result.returncode == 0:
                     merged_path = safety_out
                     print(f"Phase 2.5: safety pad +{delta_total:.4f}s (merged={merged_real:.4f} target={target_total:.4f})")
@@ -1201,11 +1304,11 @@ def _compose_scene_manifest(src, dest, content_id, config, channel, platform="yo
             cmd += ["-map", "0:v", "-map", f"{src_idx}:a"]
             if srt_filter:
                 cmd += ["-vf", srt_filter]
-        cmd += ["-c:v", "libx264", "-preset", "fast", "-crf", "18",
+        cmd += [*NVENC_HQ_ARGS,
                 "-c:a", "aac", "-b:a", "192k", output_path]
     elif has_srt:
         cmd += ["-vf", srt_filter,
-                "-c:v", "libx264", "-preset", "fast", "-crf", "18", output_path]
+                *NVENC_HQ_ARGS, output_path]
     else:
         shutil.copy2(merged_path, output_path)
         cmd = None
@@ -1216,7 +1319,7 @@ def _compose_scene_manifest(src, dest, content_id, config, channel, platform="yo
         if has_music: layers.append("music")
         if has_ambient: layers.append("ambient")
         print(f"Phase 3: mixing {' + '.join(layers) if layers else 'video only'}")
-        result = subprocess.run(cmd, capture_output=True, text=True, timeout=900)
+        result = _run_ffmpeg_with_nvenc_fallback(cmd, timeout=900, label="phase3_mux")
         if result.returncode != 0:
             raise RuntimeError(f"Phase 3 mux failed: {result.stderr[-500:]}")
 
@@ -1320,9 +1423,9 @@ def _compose_full(src, dest, content_id, config):
     if srt_in and os.path.exists(srt_in):
         cmd += ["-vf", f"subtitles={srt_in}"]
 
-    cmd += ["-c:v", "libx264", "-c:a", "aac", "-shortest", output_path]
+    cmd += [*NVENC_HQ_ARGS, "-c:a", "aac", "-shortest", output_path]
 
-    result = subprocess.run(cmd, capture_output=True, text=True, timeout=900)
+    result = _run_ffmpeg_with_nvenc_fallback(cmd, timeout=900, label="compose_full")
     if result.returncode != 0:
         raise RuntimeError(f"FFmpeg full compose failed: {result.stderr[-500:]}")
 
