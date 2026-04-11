@@ -51,6 +51,7 @@ jobs:
               - 'start_video.sh'
               - 'r2_helper.py'
               - 'download_r2_inputs.py'
+              - 'assets/**'
             shared:
               - 'extra_model_paths.yaml'
 

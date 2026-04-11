@@ -8,12 +8,17 @@
 #   - start_video.sh
 #   - r2_helper.py
 #   - download_r2_inputs.py
+#   - assets/particles.mov
 #   - Dockerfile.video.slim itself
 #
 # For rebuilds of the base image (models, custom nodes, deps):
 #   manually dispatch build-base.yml with target=video.
 
 FROM ghcr.io/peperay/yt-factory-video-base:v1
+
+# ── Static assets (overlays for effects like particles) ──
+RUN mkdir -p /workspace/assets
+COPY assets/particles.mov /workspace/assets/particles.mov
 
 # ── Handler code (changes frequently) ──
 COPY r2_helper.py /r2_helper.py

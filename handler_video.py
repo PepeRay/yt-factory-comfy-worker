@@ -378,7 +378,6 @@ def _ensure_compose_inputs(channel, content_id, src, dest):
 
 PARTICLES_ASSET_CANDIDATES = [
     "/workspace/assets/particles.mov",
-    "/runpod-volume/assets/particles.mov",
     "/comfyui/input/particles.mov",
 ]
 
@@ -625,7 +624,9 @@ def _render_match_cut(img_a, img_b, duration, seg_path, w, h, fps):
 
 
 def _render_particles(img_path, particles_path, duration, seg_path, w, h, fps):
-    """Overlay looping particles.mov on top of a ken_burns_slow base."""
+    """Blend looping particles.mov on top of a ken_burns_slow base using screen
+    mode. Source is Mixkit MP4 on pure black background (no alpha) — screen
+    blend treats black as transparent and keeps bright particles visible."""
     frames = max(1, int(round(duration * fps)))
     cx = "iw/2-(iw/zoom/2)"
     cy = "ih/2-(ih/zoom/2)"
@@ -634,8 +635,8 @@ def _render_particles(img_path, particles_path, duration, seg_path, w, h, fps):
         f"[0:v]{_ZOOMPAN_PRESCALE},"
         f"zoompan=z='{z}':x='{cx}':y='{cy}'"
         f":d={frames}:s={w}x{h}:fps={fps},format=yuv420p[base];"
-        f"[1:v]scale={w}:{h},format=yuva420p,colorchannelmixer=aa=0.7[parts];"
-        f"[base][parts]overlay=0:0:shortest=0,format=yuv420p"
+        f"[1:v]scale={w}:{h},fps={fps},eq=brightness=-0.05,format=yuv420p[parts];"
+        f"[base][parts]blend=all_mode=screen:shortest=1,format=yuv420p"
     )
     cmd = [
         "ffmpeg", "-y",
