@@ -58,20 +58,14 @@ RUN grep -v -i -E '^(torch==|torch>=|torch<=|torchvision==|torchvision>=|torchau
 #   UnetLoaderGGUF, CLIPLoaderGGUF → comfyui-gguf
 #   VHS_VideoCombine → comfyui-videohelpersuite
 #   Power Lora Loader (rgthree) → rgthree-comfy
-# kjnodes/custom-scripts/comfymath/easy-use bakeados por herencia del pipeline LTX
-# legacy — el workflow n8n actual (o2FsjSmuVUIk5qb3) no los usa. Pendiente de
-# limpieza en commit separado (ver backlog en Arquitectura Técnica.md).
-# RES4LYF removido 2026-04-11: huérfano de LTX legacy, no aparece en el workflow
-# actual, e importa `comfy.nested_tensor` que no existe en ComfyUI v0.3.47.
+# Removed 2026-04-11 (cleanup commit): KJNodes, Custom-Scripts, ComfyMath, Easy-Use
+# Evidence: workflow o2FsjSmuVUIk5qb3 + handler_video.py never use their class_types.
+# Estimated savings: ~10-15 min build time, ~1 GB image size.
 RUN cd /comfyui/custom_nodes && set -e && \
     for repo in \
       "https://github.com/Kosinkadink/ComfyUI-VideoHelperSuite.git" \
-      "https://github.com/kijai/ComfyUI-KJNodes.git" \
-      "https://github.com/pythongosssss/ComfyUI-Custom-Scripts.git" \
       "https://github.com/city96/ComfyUI-GGUF.git" \
       "https://github.com/rgthree/rgthree-comfy.git" \
-      "https://github.com/evanspearman/ComfyMath.git" \
-      "https://github.com/yolain/ComfyUI-Easy-Use.git" \
     ; do \
       name=$(basename "$repo" .git); \
       echo "=== Cloning $name ==="; \
@@ -86,7 +80,7 @@ RUN cd /comfyui/custom_nodes && set -e && \
       fi; \
       test -f "$name/__init__.py" || { echo "ERROR: $name missing __init__.py"; exit 1; }; \
     done && \
-    echo "=== 7 video custom nodes installed ==="
+    echo "=== 3 video custom nodes installed ==="
 
 WORKDIR /
 
@@ -203,14 +197,10 @@ print('=== Video endpoint environment verified ===')"
 COPY verify_custom_nodes.py /tmp/verify_custom_nodes.py
 RUN python /tmp/verify_custom_nodes.py \
       ComfyUI-VideoHelperSuite \
-      ComfyUI-KJNodes \
-      ComfyUI-Custom-Scripts \
       ComfyUI-GGUF \
       rgthree-comfy \
-      ComfyMath \
-      ComfyUI-Easy-Use \
     && rm /tmp/verify_custom_nodes.py \
-    && echo "=== 7 custom nodes verified (import-level) ==="
+    && echo "=== 3 custom nodes verified (import-level) ==="
 
 # ── Verify Wan 2.2 models (build-time gate) ─────────────────
 RUN test -f /comfyui/models/diffusion_models/Wan2.2-I2V-A14B-HighNoise-Q8_0.gguf && \
