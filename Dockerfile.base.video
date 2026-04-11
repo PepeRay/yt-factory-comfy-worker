@@ -7,7 +7,7 @@ ARG BASE_IMAGE=nvidia/cuda:12.6.3-cudnn-runtime-ubuntu24.04
 
 FROM ${BASE_IMAGE} AS base
 
-ARG COMFYUI_VERSION=0.18.2
+ARG COMFYUI_VERSION=v0.3.47
 ARG HF_TOKEN
 ENV HF_TOKEN=${HF_TOKEN}
 
@@ -148,13 +148,13 @@ RUN wget -q --show-progress -O /comfyui/models/clip/umt5-xxl-encoder-Q5_K_S.gguf
 RUN wget -q --show-progress -O /comfyui/models/vae/wan_2.1_vae.safetensors \
     "https://huggingface.co/Comfy-Org/Wan_2.1_ComfyUI_repackaged/resolve/main/split_files/vae/wan_2.1_vae.safetensors"
 
-# Wan 2.2 Lightning I2V LoRA HIGH (~614 MB)
-RUN wget -q --show-progress -O /comfyui/models/loras/Wan2.2-Lightning_I2V-A14B-4steps-lora_HIGH_fp16.safetensors \
-    "https://huggingface.co/Kijai/WanVideo_comfy/resolve/main/LoRAs/Wan22-Lightning/old/Wan2.2-Lightning_I2V-A14B-4steps-lora_HIGH_fp16.safetensors"
+# Wan 2.2 Lightning I2V LoRA HIGH Seko-V1 rank64 (~1.23 GB)
+RUN wget -q --show-progress -O /comfyui/models/loras/Wan2.2-I2V-A14B-Lightning-4steps-HIGH-rank64-Seko-V1.safetensors \
+    "https://huggingface.co/lightx2v/Wan2.2-Lightning/resolve/main/Wan2.2-I2V-A14B-4steps-lora-rank64-Seko-V1/high_noise_model.safetensors"
 
-# Wan 2.2 Lightning I2V LoRA LOW (~614 MB)
-RUN wget -q --show-progress -O /comfyui/models/loras/Wan2.2-Lightning_I2V-A14B-4steps-lora_LOW_fp16.safetensors \
-    "https://huggingface.co/Kijai/WanVideo_comfy/resolve/main/LoRAs/Wan22-Lightning/old/Wan2.2-Lightning_I2V-A14B-4steps-lora_LOW_fp16.safetensors"
+# Wan 2.2 Lightning I2V LoRA LOW Seko-V1 rank64 (~1.23 GB)
+RUN wget -q --show-progress -O /comfyui/models/loras/Wan2.2-I2V-A14B-Lightning-4steps-LOW-rank64-Seko-V1.safetensors \
+    "https://huggingface.co/lightx2v/Wan2.2-Lightning/resolve/main/Wan2.2-I2V-A14B-4steps-lora-rank64-Seko-V1/low_noise_model.safetensors"
 
 # 4x ClearReality V1 upscaler (~9 MB)
 RUN wget -q --show-progress -O /comfyui/models/upscale_models/4x-ClearRealityV1.pth \
@@ -202,8 +202,8 @@ RUN test -f /comfyui/models/diffusion_models/Wan2.2-I2V-A14B-HighNoise-Q8_0.gguf
     test -f /comfyui/models/diffusion_models/Wan2.2-I2V-A14B-LowNoise-Q8_0.gguf && \
     test -f /comfyui/models/clip/umt5-xxl-encoder-Q5_K_S.gguf && \
     test -f /comfyui/models/vae/wan_2.1_vae.safetensors && \
-    test -f /comfyui/models/loras/Wan2.2-Lightning_I2V-A14B-4steps-lora_HIGH_fp16.safetensors && \
-    test -f /comfyui/models/loras/Wan2.2-Lightning_I2V-A14B-4steps-lora_LOW_fp16.safetensors && \
+    test -f /comfyui/models/loras/Wan2.2-I2V-A14B-Lightning-4steps-HIGH-rank64-Seko-V1.safetensors && \
+    test -f /comfyui/models/loras/Wan2.2-I2V-A14B-Lightning-4steps-LOW-rank64-Seko-V1.safetensors && \
     test -f /comfyui/models/upscale_models/4x-ClearRealityV1.pth && \
     test -f /comfyui/models/clip_vision/clip_vision_h.safetensors && \
     echo "=== All 8 Wan 2.2 models verified ==="
