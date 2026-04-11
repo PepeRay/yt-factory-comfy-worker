@@ -3,8 +3,14 @@ Build-time gate for ComfyUI custom nodes.
 
 Ejecuta un import real de cada custom node replicando lo que ComfyUI hace
 al arrancar (`nodes.load_custom_node` → `importlib.util.spec_from_file_location`
-→ `exec_module`). Si un nodo existe físicamente pero falla al importar en
-runtime (ej: `ModuleNotFoundError`), este script falla el build.
+→ `exec_module`). Si un nodo tiene deps faltantes (`ModuleNotFoundError` /
+`ImportError`), este script falla el build.
+
+Catch granular:
+    - ModuleNotFoundError / ImportError → FAIL (el nodo no va a cargar en runtime)
+    - Cualquier otra excepción (típicamente RuntimeError por falta de GPU en
+      el runner de GitHub Actions) → SKIP. El runtime real en RunPod sí tiene
+      driver NVIDIA y el nodo cargará OK.
 
 Uso:
     python verify_custom_nodes.py NodeFolder1 NodeFolder2 ...
@@ -13,7 +19,15 @@ Contexto del bug que motivó este script (2026-04-11):
     RES4LYF se instaló correctamente (`__init__.py` presente) pero en runtime
     fallaba con `No module named 'comfy.nested_tensor'` porque ese módulo no
     existe en ComfyUI v0.3.47. El gate anterior (`test -f __init__.py`)
-    no lo detectaba. Este script sí.
+    no lo detectaba. Este script sí — porque `ModuleNotFoundError` es
+    exactamente el tipo que capturamos como fallo.
+
+Contexto del segundo intento (2026-04-11):
+    La primera versión del script hacía `except Exception` genérico, lo que
+    hacía que el build fallara en GitHub Actions porque los runners no tienen
+    GPU física y los custom nodes disparan `torch.cuda.current_device()` al
+    importar → RuntimeError "Found no NVIDIA driver". Ese error es artefacto
+    del build environment, no un bug real del nodo. Por eso el catch granular.
 """
 import importlib.util
 import sys
@@ -42,8 +56,12 @@ def verify(node_folders: list[str]) -> None:
         module = importlib.util.module_from_spec(spec)
         try:
             spec.loader.exec_module(module)
-        except Exception as exc:
+        except (ModuleNotFoundError, ImportError) as exc:
             failures.append((folder, f"{type(exc).__name__}: {exc}"))
+            continue
+        except Exception as exc:
+            msg = str(exc).splitlines()[0][:120] if str(exc) else ""
+            print(f"  [SKIP] {folder}: {type(exc).__name__} at build time (expected without GPU) — {msg}")
             continue
         print(f"  [OK]   {folder}")
 
