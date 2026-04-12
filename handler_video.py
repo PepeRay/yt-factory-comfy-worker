@@ -756,7 +756,7 @@ def _render_particles(img_path, particles_path, duration, seg_path, w, h, fps):
         f"[0:v]{_ZOOMPAN_PRESCALE},"
         f"zoompan=z='{z}':x='{cx}':y='{cy}'"
         f":d={frames}:s={w}x{h}:fps={fps},format=yuv420p[base];"
-        f"[1:v]scale={w}:{h},fps={fps},eq=brightness=-0.05,format=yuv420p[parts];"
+        f"[1:v]scale={w}:{h},fps={fps},eq=brightness=-0.02,format=yuv420p[parts];"
         f"[base][parts]blend=all_mode=screen:shortest=1,format=yuv420p"
     )
     cmd = [
@@ -784,7 +784,7 @@ def _apply_particles_overlay(video_path, seg_path, duration, w, h, fps):
         return video_path
     fc = (
         f"[0:v]format=yuv420p[base];"
-        f"[1:v]scale={w}:{h},fps={fps},eq=brightness=-0.05,format=yuv420p[parts];"
+        f"[1:v]scale={w}:{h},fps={fps},eq=brightness=-0.02,format=yuv420p[parts];"
         f"[base][parts]blend=all_mode=screen:shortest=1,format=yuv420p"
     )
     cmd = [
@@ -1053,6 +1053,9 @@ def _compose_scene_manifest(src, dest, content_id, config, channel, platform="yo
                     # Fallback to ken_burns if no final image
                     render_type = "ken_burns"
                 else:
+                    # If particles overlay requested, render crossfade base to temp first
+                    wants_particles = bool(scene.get("_particles_overlay"))
+                    crossfade_out = seg_path.replace(".mp4", "_base.mp4") if wants_particles else seg_path
                     frames = int(duration * FPS)
                     cmd = [
                         "ffmpeg", "-y",
@@ -1063,11 +1066,18 @@ def _compose_scene_manifest(src, dest, content_id, config, channel, platform="yo
                         f"[1:v]scale={WIDTH}:{HEIGHT},setsar=1,format=yuv420p[b];"
                         f"[a][b]blend=all_expr='A*(1-T/{duration})+B*(T/{duration})':shortest=1",
                         "-t", str(duration), "-r", str(FPS),
-                        *NVENC_HQ_ARGS, seg_path
+                        *NVENC_HQ_ARGS, crossfade_out
                     ]
                     result = _run_ffmpeg_with_nvenc_fallback(cmd, timeout=120, label=f"crossfade sid={sid}")
                     if result.returncode != 0:
                         raise RuntimeError(f"segment {sid} crossfade: {result.stderr[-200:]}")
+                    if wants_particles:
+                        try:
+                            _apply_particles_overlay(crossfade_out, seg_path, float(duration),
+                                                     WIDTH, HEIGHT, FPS)
+                        except Exception as e:
+                            print(f"WARN: scene {sid} crossfade particles overlay failed ({e}), using base")
+                            os.replace(crossfade_out, seg_path)
                     # Generate silence for non-video scenes
                     sil_cmd = ["ffmpeg", "-y", "-f", "lavfi", "-i", f"anullsrc=r=44100:cl=stereo", "-t", str(duration), "-c:a", "aac", amb_path]
                     subprocess.run(sil_cmd, capture_output=True, text=True, timeout=30)
