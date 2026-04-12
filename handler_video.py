@@ -759,6 +759,46 @@ def _render_particles(img_path, particles_path, duration, seg_path, w, h, fps):
     return seg_path
 
 
+def _apply_particles_overlay(video_path, seg_path, duration, w, h, fps):
+    """Overlay particles.mov on top of an already-rendered base effect video.
+    Uses screen blend mode (black=transparent). If particles asset is missing
+    or ffmpeg fails, silently returns the base video unchanged."""
+    particles = _find_particles_asset()
+    if not particles:
+        print(f"[particles_overlay] no asset found, skipping overlay")
+        return video_path
+    fc = (
+        f"[0:v]format=yuv420p[base];"
+        f"[1:v]scale={w}:{h},fps={fps},eq=brightness=-0.05,format=yuv420p[parts];"
+        f"[base][parts]blend=all_mode=screen:shortest=1,format=yuv420p"
+    )
+    cmd = [
+        "ffmpeg", "-y",
+        "-i", video_path,
+        "-stream_loop", "-1", "-i", particles,
+        "-filter_complex", fc,
+        "-t", f"{duration:.4f}", "-r", str(fps),
+        *NVENC_HQ_ARGS, "-an", seg_path,
+    ]
+    print(f"[effect] particles_overlay on base d={duration:.2f}s")
+    try:
+        result = _run_ffmpeg_with_nvenc_fallback(cmd, timeout=180, label="particles_overlay")
+        if result.returncode != 0:
+            print(f"WARN: particles_overlay failed, using base: {result.stderr[-200:]}")
+            if os.path.exists(video_path) and video_path != seg_path:
+                os.rename(video_path, seg_path)
+            return seg_path
+        # Clean up temp base file
+        if os.path.exists(video_path) and video_path != seg_path:
+            os.remove(video_path)
+        return seg_path
+    except Exception as e:
+        print(f"WARN: particles_overlay exception, using base: {e}")
+        if os.path.exists(video_path) and video_path != seg_path:
+            os.rename(video_path, seg_path)
+        return seg_path
+
+
 def _compose_scene_manifest(src, dest, content_id, config, channel, platform="youtube"):
     """
     Compose full video from scenes.json v2 manifest.
@@ -949,8 +989,16 @@ def _compose_scene_manifest(src, dest, content_id, config, channel, platform="yo
                     img_b = _find_image(img_dir, sid, "final")
 
                 try:
-                    _render_image_effect(effect, img_a, img_b, float(duration),
-                                         seg_path, WIDTH, HEIGHT, FPS)
+                    # If particles overlay requested, render base to temp first
+                    if scene.get("_particles_overlay"):
+                        base_path = seg_path.replace(".mp4", "_base.mp4")
+                        _render_image_effect(effect, img_a, img_b, float(duration),
+                                             base_path, WIDTH, HEIGHT, FPS)
+                        _apply_particles_overlay(base_path, seg_path, float(duration),
+                                                 WIDTH, HEIGHT, FPS)
+                    else:
+                        _render_image_effect(effect, img_a, img_b, float(duration),
+                                             seg_path, WIDTH, HEIGHT, FPS)
                 except Exception as e:
                     print(f"WARN: scene {sid} effect '{effect}' failed ({e}), falling back to static")
                     # Last-resort fallback: static render. Never let a bad
