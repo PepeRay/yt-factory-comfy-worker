@@ -48,7 +48,16 @@
         },
         "class_type": "LoadImage",
         "_meta": {
-          "title": "Load Start Image"
+          "title": "Load Start Image (First Frame)"
+        }
+      },
+      "28": {
+        "inputs": {
+          "image": "scene_001_final.png"
+        },
+        "class_type": "LoadImage",
+        "_meta": {
+          "title": "Load End Image (Last Frame)"
         }
       },
       "15": {
@@ -62,6 +71,81 @@
         "class_type": "CLIPTextEncode",
         "_meta": {
           "title": "CLIP Text Encode (Prompt)"
+        }
+      },
+      "16": {
+        "inputs": {
+          "text": "",
+          "clip": [
+            "12",
+            0
+          ]
+        },
+        "class_type": "CLIPTextEncode",
+        "_meta": {
+          "title": "CLIP Text Encode (Negative)"
+        }
+      },
+      "18": {
+        "inputs": {
+          "clip_name": "clip_vision_h.safetensors"
+        },
+        "class_type": "CLIPVisionLoader",
+        "_meta": {
+          "title": "CLIPVision Loader"
+        }
+      },
+      "19": {
+        "inputs": {
+          "crop": "center",
+          "clip_vision": [
+            "18",
+            0
+          ],
+          "image": [
+            "14",
+            0
+          ]
+        },
+        "class_type": "CLIPVisionEncode",
+        "_meta": {
+          "title": "CLIPVision Encode (Start Image)"
+        }
+      },
+      "25": {
+        "inputs": {
+          "width": 832,
+          "height": 480,
+          "length": 81,
+          "batch_size": 1,
+          "start_image": [
+            "14",
+            0
+          ],
+          "end_image": [
+            "28",
+            0
+          ],
+          "clip_vision_start_image": [
+            "19",
+            0
+          ],
+          "vae": [
+            "13",
+            0
+          ],
+          "positive": [
+            "15",
+            0
+          ],
+          "negative": [
+            "16",
+            0
+          ]
+        },
+        "class_type": "WanFirstLastFrameToVideo",
+        "_meta": {
+          "title": "Wan First Last Frame To Video"
         }
       },
       "20": {
@@ -79,7 +163,7 @@
       },
       "21": {
         "inputs": {
-          "shift": 2.0,
+          "shift": 5.0,
           "model": [
             "31",
             0
@@ -88,47 +172,6 @@
         "class_type": "ModelSamplingSD3",
         "_meta": {
           "title": "ModelSamplingSD3 — Low Noise Shift"
-        }
-      },
-      "25": {
-        "inputs": {
-          "width": 832,
-          "height": 480,
-          "length": 81,
-          "batch_size": 1,
-          "start_image": [
-            "14",
-            0
-          ],
-          "vae": [
-            "13",
-            0
-          ],
-          "positive": [
-            "15",
-            0
-          ],
-          "negative": [
-            "16",
-            0
-          ]
-        },
-        "class_type": "WanImageToVideo",
-        "_meta": {
-          "title": "Wan Image To Video"
-        }
-      },
-      "16": {
-        "inputs": {
-          "text": "",
-          "clip": [
-            "12",
-            0
-          ]
-        },
-        "class_type": "CLIPTextEncode",
-        "_meta": {
-          "title": "CLIP Text Encode (Negative)"
         }
       },
       "30": {
@@ -180,7 +223,7 @@
           "steps": 4,
           "cfg": 1.0,
           "sampler_name": "euler",
-          "scheduler": "normal",
+          "scheduler": "simple",
           "start_at_step": 0,
           "end_at_step": 2,
           "return_with_leftover_noise": "enable",
@@ -214,7 +257,7 @@
           "steps": 4,
           "cfg": 1.0,
           "sampler_name": "euler",
-          "scheduler": "normal",
+          "scheduler": "simple",
           "start_at_step": 2,
           "end_at_step": 4,
           "return_with_leftover_noise": "disable",
