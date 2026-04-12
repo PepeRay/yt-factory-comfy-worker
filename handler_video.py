@@ -1493,6 +1493,7 @@ def _ensure_img_vid_inputs(channel, content_id):
     try:
         keys = r2_helper.list_files(r2_prefix)
         downloaded = 0
+        uploaded = 0
         for key in keys:
             fname = os.path.basename(key)
             if not fname:
@@ -1501,7 +1502,9 @@ def _ensure_img_vid_inputs(channel, content_id):
             if not os.path.exists(local_path):
                 r2_helper.download_file(key, local_path)
                 downloaded += 1
-        print(f"[INFO] img-vid inputs: {len(keys)} in R2, {downloaded} downloaded to {input_dir}")
+            if _upload_to_comfyui(local_path):
+                uploaded += 1
+        print(f"[INFO] img-vid inputs: {len(keys)} in R2, {downloaded} downloaded, {uploaded} registered with ComfyUI")
     except Exception as e:
         print(f"[WARN] Failed to download img-vid inputs: {e}")
 
