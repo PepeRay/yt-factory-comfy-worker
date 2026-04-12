@@ -555,20 +555,30 @@ def _render_image_effect(effect, img_a, img_b, duration, seg_path, w, h, fps):
         effect = "ken_burns_slow"
 
     # ---- Ken Burns family (zoom in/out, centered) ------------------------
+    # Fix D: duration-aware z_rate so zoom reaches cap/floor exactly on the
+    # last frame — no static tail on long scenes.
     if effect == "ken_burns_in":
         # Slow zoom from 1.0 → 1.15 over the whole duration
-        z = f"min(zoom+0.0010,1.15)"
+        z_rate = 0.15 / max(frames - 1, 1)
+        print(f"[effect] {effect} z_rate={z_rate:.8f} frames={frames}")
+        z = f"min(zoom+{z_rate:.8f},1.15)"
         fc = _zoompan_chain(z, cx, cy, frames, w, h, fps)
     elif effect == "ken_burns_out":
         # Start at 1.15x and zoom out toward 1.0x. zoompan's z is a running
         # accumulator; we initialize it at 1.15 and decrement each frame.
-        z = f"if(eq(on,0),1.15,max(zoom-0.0010,1.0))"
+        z_rate = 0.15 / max(frames - 1, 1)
+        print(f"[effect] {effect} z_rate={z_rate:.8f} frames={frames}")
+        z = f"if(eq(on,0),1.15,max(zoom-{z_rate:.8f},1.0))"
         fc = _zoompan_chain(z, cx, cy, frames, w, h, fps)
     elif effect == "ken_burns_slow":
-        z = f"min(zoom+0.0006,1.08)"
+        z_rate = 0.08 / max(frames - 1, 1)
+        print(f"[effect] {effect} z_rate={z_rate:.8f} frames={frames}")
+        z = f"min(zoom+{z_rate:.8f},1.08)"
         fc = _zoompan_chain(z, cx, cy, frames, w, h, fps)
     elif effect == "ken_burns_fast":
-        z = f"min(zoom+0.0025,1.35)"
+        z_rate = 0.35 / max(frames - 1, 1)
+        print(f"[effect] {effect} z_rate={z_rate:.8f} frames={frames}")
+        z = f"min(zoom+{z_rate:.8f},1.35)"
         fc = _zoompan_chain(z, cx, cy, frames, w, h, fps)
 
     # ---- Pan L/R: horizontal camera slide, slight zoom so crop is valid --
@@ -598,11 +608,16 @@ def _render_image_effect(effect, img_a, img_b, duration, seg_path, w, h, fps):
         fc = _zoompan_chain(z, x, y, frames, w, h, fps)
 
     # ---- Rapid zoom in/out: more aggressive than Ken Burns fast ---------
+    # Fix D: duration-aware z_rate (same rationale as ken_burns family).
     elif effect == "zoom_in":
-        z = f"min(zoom+0.0040,1.50)"
+        z_rate = 0.50 / max(frames - 1, 1)
+        print(f"[effect] {effect} z_rate={z_rate:.8f} frames={frames}")
+        z = f"min(zoom+{z_rate:.8f},1.50)"
         fc = _zoompan_chain(z, cx, cy, frames, w, h, fps)
     elif effect == "zoom_out":
-        z = f"if(eq(on,0),1.50,max(zoom-0.0040,1.0))"
+        z_rate = 0.50 / max(frames - 1, 1)
+        print(f"[effect] {effect} z_rate={z_rate:.8f} frames={frames}")
+        z = f"if(eq(on,0),1.50,max(zoom-{z_rate:.8f},1.0))"
         fc = _zoompan_chain(z, cx, cy, frames, w, h, fps)
 
     # ---- Whip pan: intra-scene fast horizontal pan with motion blur -----
@@ -908,15 +923,103 @@ def _compose_scene_manifest(src, dest, content_id, config, channel, platform="yo
                     ]
 
                     if delta > 0.05:
-                        # Pad with freeze frame of last frame for delta seconds.
-                        # Combine scale/crop with tpad in a single -vf chain.
-                        norm_args[1] = (
-                            f"scale={WIDTH}:{HEIGHT}:force_original_aspect_ratio=increase,"
-                            f"crop={WIDTH}:{HEIGHT},setsar=1,"
-                            f"tpad=stop_mode=clone:stop_duration={delta:.4f}"
+                        # Fix B: Instead of freezing the last frame (which looks
+                        # dead), keep the camera "alive" by applying a very subtle
+                        # ken_burns zoompan (1.0 → 1.06x) over the last frame for
+                        # `delta` seconds, then concat with the normalized clip.
+                        # Two-pass approach — more robust than a conditional
+                        # zoompan filter, and guarantees the first tail frame
+                        # matches the last clip frame (same source pixel).
+                        clip_seg = os.path.join(segments_dir, f"seg_{sid:04d}_clip.mp4")
+                        tail_seg = os.path.join(segments_dir, f"seg_{sid:04d}_tail.mp4")
+                        tail_png = os.path.join(segments_dir, f"seg_{sid:04d}_last.png")
+                        concat_list = os.path.join(segments_dir, f"seg_{sid:04d}_concat.txt")
+
+                        # Pass 1: normalize the Wan 2.2 clip as-is (no tpad).
+                        cmd_clip = ["ffmpeg", "-y", "-i", clip_path] + norm_args + [clip_seg]
+                        result = _run_ffmpeg_with_nvenc_fallback(cmd_clip, timeout=180, label=f"video_clip_norm sid={sid} (clip)")
+                        if result.returncode != 0:
+                            raise RuntimeError(f"segment {sid} video_clip (clip pass): {result.stderr[-200:]}")
+
+                        # Pass 2a: extract last frame of the normalized clip
+                        # (already at WIDTH×HEIGHT, so no re-scale needed).
+                        extract_cmd = [
+                            "ffmpeg", "-y", "-sseof", "-0.1", "-i", clip_seg,
+                            "-vsync", "0", "-frames:v", "1", "-q:v", "2", tail_png
+                        ]
+                        ext_res = subprocess.run(extract_cmd, capture_output=True, text=True, timeout=30)
+                        if ext_res.returncode != 0 or not os.path.exists(tail_png):
+                            raise RuntimeError(f"segment {sid} video_clip: failed to extract last frame: {ext_res.stderr[-200:]}")
+
+                        # Pass 2b: render ken_burns zoompan from the PNG for
+                        # `delta` seconds. Zoom 1.0 → 1.06 centered, linear.
+                        tail_frames = max(1, int(round(delta * FPS)))
+                        # zoompan expression: z starts at 1.0, linearly reaches
+                        # 1.06 at the last frame. on=frame index, d=tail_frames.
+                        # Use `on/(tail_frames-1)` ratio clamped to [0,1].
+                        zoom_end = 1.06
+                        if tail_frames <= 1:
+                            zoom_expr = "1.0"
+                        else:
+                            zoom_expr = f"1.0+({zoom_end-1.0:.4f})*on/{tail_frames-1}"
+                        # Render at higher internal resolution to avoid zoompan
+                        # jitter, then downscale to WIDTH×HEIGHT.
+                        zp_filter = (
+                            f"scale={WIDTH*4}:{HEIGHT*4}:flags=lanczos,"
+                            f"zoompan=z='{zoom_expr}':x='iw/2-(iw/zoom/2)':y='ih/2-(ih/zoom/2)':"
+                            f"d={tail_frames}:s={WIDTH}x{HEIGHT}:fps={FPS},"
+                            f"setsar=1"
                         )
-                        cmd = ["ffmpeg", "-y", "-i", clip_path] + norm_args + [seg_path]
-                        print(f"[video_clip sid={sid}] pad +{delta:.4f}s (real={clip_real_dur:.4f} target={target_dur:.4f})")
+                        cmd_tail = [
+                            "ffmpeg", "-y",
+                            "-loop", "1", "-i", tail_png,
+                            "-vf", zp_filter,
+                            "-t", f"{delta:.4f}",
+                            "-r", str(FPS),
+                            *NVENC_NORM_ARGS, "-an",
+                            tail_seg,
+                        ]
+                        result = _run_ffmpeg_with_nvenc_fallback(cmd_tail, timeout=120, label=f"video_clip_norm sid={sid} (tail)")
+                        if result.returncode != 0:
+                            raise RuntimeError(f"segment {sid} video_clip (tail pass): {result.stderr[-200:]}")
+
+                        # Pass 3: concat demuxer — lossless stitch.
+                        with open(concat_list, "w") as f:
+                            f.write(f"file '{os.path.basename(clip_seg)}'\n")
+                            f.write(f"file '{os.path.basename(tail_seg)}'\n")
+                        cmd_concat = [
+                            "ffmpeg", "-y", "-f", "concat", "-safe", "0",
+                            "-i", concat_list, "-c", "copy", seg_path,
+                        ]
+                        cc_res = subprocess.run(cmd_concat, capture_output=True, text=True, timeout=60)
+                        if cc_res.returncode != 0:
+                            # Fallback: re-encode the concat if copy fails
+                            # (e.g. slight timebase mismatch).
+                            cmd_concat_re = [
+                                "ffmpeg", "-y", "-f", "concat", "-safe", "0",
+                                "-i", concat_list, "-r", str(FPS),
+                                *NVENC_NORM_ARGS, "-an", seg_path,
+                            ]
+                            cc_res = _run_ffmpeg_with_nvenc_fallback(cmd_concat_re, timeout=120, label=f"video_clip_norm sid={sid} (concat reencode)")
+                            if cc_res.returncode != 0:
+                                raise RuntimeError(f"segment {sid} video_clip (concat): {cc_res.stderr[-200:]}")
+
+                        # Cleanup intermediates (best effort).
+                        for _tmp in (clip_seg, tail_seg, tail_png, concat_list):
+                            try:
+                                os.remove(_tmp)
+                            except Exception:
+                                pass
+
+                        print(f"[video_clip sid={sid}] freeze-tail ken_burns zoompan +{delta:.4f}s (real={clip_real_dur:.4f} target={target_dur:.4f})")
+                        # Extract ambient audio from the original clip.
+                        ext_cmd = ["ffmpeg", "-y", "-i", clip_path, "-vn", "-c:a", "aac", "-b:a", "128k", amb_path]
+                        ext_result = subprocess.run(ext_cmd, capture_output=True, text=True, timeout=30)
+                        if ext_result.returncode != 0:
+                            sil_cmd = ["ffmpeg", "-y", "-f", "lavfi", "-i", f"anullsrc=r=44100:cl=stereo", "-t", str(duration), "-c:a", "aac", amb_path]
+                            subprocess.run(sil_cmd, capture_output=True, text=True, timeout=30)
+                        segment_paths.append({"path": seg_path, "scene": scene})
+                        continue
                     elif delta < -0.05:
                         # Clip longer than target — trim to target_dur.
                         cmd = ["ffmpeg", "-y", "-i", clip_path] + norm_args + ["-t", f"{target_dur:.4f}", seg_path]
