@@ -1,7 +1,7 @@
 """
 YouTube Factory — Audio Endpoint Handler
 Job types: txt-voice, voice-srt, compose (concat_audio only), upload-inputs (temp)
-Models: VibeVoice TTS, Whisper STT
+Models: Qwen3-TTS (EN), CosyVoice3 (ES), Whisper STT
 """
 
 import json
