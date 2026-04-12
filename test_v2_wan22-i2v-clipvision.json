@@ -64,6 +64,19 @@
           "title": "CLIP Text Encode (Prompt)"
         }
       },
+      "16": {
+        "inputs": {
+          "text": "",
+          "clip": [
+            "12",
+            0
+          ]
+        },
+        "class_type": "CLIPTextEncode",
+        "_meta": {
+          "title": "CLIP Text Encode (Negative)"
+        }
+      },
       "20": {
         "inputs": {
           "shift": 5.0,
@@ -111,24 +124,15 @@
           "negative": [
             "16",
             0
+          ],
+          "clip_vision_output": [
+            "71",
+            0
           ]
         },
         "class_type": "WanImageToVideo",
         "_meta": {
           "title": "Wan Image To Video"
-        }
-      },
-      "16": {
-        "inputs": {
-          "text": "",
-          "clip": [
-            "12",
-            0
-          ]
-        },
-        "class_type": "CLIPTextEncode",
-        "_meta": {
-          "title": "CLIP Text Encode (Negative)"
         }
       },
       "30": {
@@ -277,6 +281,32 @@
         "class_type": "VHS_VideoCombine",
         "_meta": {
           "title": "Video Combine 🎥🅥🅗🅢"
+        }
+      },
+      "70": {
+        "inputs": {
+          "clip_name": "clip_vision_h.safetensors"
+        },
+        "class_type": "CLIPVisionLoader",
+        "_meta": {
+          "title": "CLIP Vision Loader — H"
+        }
+      },
+      "71": {
+        "inputs": {
+          "crop": "center",
+          "clip_vision": [
+            "70",
+            0
+          ],
+          "image": [
+            "14",
+            0
+          ]
+        },
+        "class_type": "CLIPVisionEncode",
+        "_meta": {
+          "title": "CLIP Vision Encode — Start Frame"
         }
       }
     }
