@@ -747,7 +747,16 @@ def _render_match_cut(img_a, img_b, duration, seg_path, w, h, fps):
 def _render_particles(img_path, particles_path, duration, seg_path, w, h, fps):
     """Blend looping particles.mov on top of a ken_burns_slow base using screen
     mode. Source is Mixkit MP4 on pure black background (no alpha) — screen
-    blend treats black as transparent and keeps bright particles visible."""
+    blend treats black as transparent and keeps bright particles visible.
+
+    Loop strategy: the particles are looped via the ``loop`` video filter
+    (filter-graph level) instead of ``-stream_loop -1`` at the demuxer. The
+    demuxer-level loop combined with the ``fps`` filter on a MOV with
+    non-monotonic PTS across loop boundaries caused the blend to freeze after
+    the first iteration (~10s). The filter-level loop caches frames and
+    replays them with fresh timestamps, producing continuously animated
+    particles for any scene duration.
+    """
     frames = max(1, int(round(duration * fps)))
     cx = "iw/2-(iw/zoom/2)"
     cy = "ih/2-(ih/zoom/2)"
@@ -756,13 +765,14 @@ def _render_particles(img_path, particles_path, duration, seg_path, w, h, fps):
         f"[0:v]{_ZOOMPAN_PRESCALE},"
         f"zoompan=z='{z}':x='{cx}':y='{cy}'"
         f":d={frames}:s={w}x{h}:fps={fps},format=yuv420p[base];"
-        f"[1:v]scale={w}:{h},fps={fps},eq=brightness=-0.02,format=yuv420p[parts];"
+        f"[1:v]loop=loop=-1:size=260:start=0,setpts=N/FRAME_RATE/TB,"
+        f"scale={w}:{h},fps={fps},eq=brightness=-0.02,format=yuv420p[parts];"
         f"[base][parts]blend=all_mode=screen:shortest=1,format=yuv420p"
     )
     cmd = [
         "ffmpeg", "-y",
         "-loop", "1", "-i", img_path,
-        "-stream_loop", "-1", "-i", particles_path,
+        "-i", particles_path,
         "-filter_complex", fc,
         "-t", f"{duration:.4f}", "-r", str(fps),
         *NVENC_HQ_ARGS, "-an", seg_path,
@@ -782,15 +792,21 @@ def _apply_particles_overlay(video_path, seg_path, duration, w, h, fps):
     if not particles:
         print(f"[particles_overlay] no asset found, skipping overlay")
         return video_path
+    # Loop particles via the ``loop`` video filter rather than ``-stream_loop
+    # -1`` at the demuxer. Demuxer-level loop with MOV produces non-monotonic
+    # PTS across loop boundaries, which the blend filter freezes on after the
+    # first iteration. Filter-level loop caches frames and replays them with
+    # regenerated timestamps, keeping particles animated for the full scene.
     fc = (
         f"[0:v]format=yuv420p[base];"
-        f"[1:v]scale={w}:{h},fps={fps},eq=brightness=-0.02,format=yuv420p[parts];"
+        f"[1:v]loop=loop=-1:size=260:start=0,setpts=N/FRAME_RATE/TB,"
+        f"scale={w}:{h},fps={fps},eq=brightness=-0.02,format=yuv420p[parts];"
         f"[base][parts]blend=all_mode=screen:shortest=1,format=yuv420p"
     )
     cmd = [
         "ffmpeg", "-y",
         "-i", video_path,
-        "-stream_loop", "-1", "-i", particles,
+        "-i", particles,
         "-filter_complex", fc,
         "-t", f"{duration:.4f}", "-r", str(fps),
         *NVENC_HQ_ARGS, "-an", seg_path,
