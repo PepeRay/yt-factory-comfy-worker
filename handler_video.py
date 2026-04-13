@@ -1500,13 +1500,29 @@ def _compose_scene_manifest(src, dest, content_id, config, channel, platform="yo
                            "to_scene": scenes[-1]["scene_id"], "mood": mood}]
 
         # Calculate cumulative scene durations
+        #
+        # Fix L3 (2026-04-13): subtract xfade overlap from scenes with
+        # xfade transition_in. After Fix L2, scenes.json contains
+        # `duration_sec = narration_dur + xfade_in_comp` (the render
+        # duration, not the narration duration). If we use that raw value
+        # for music act boundaries, the music total inflates by ~13s and
+        # produces weird amix interactions including attenuation of
+        # the narration ~18dB in the final ~2s window. We want the music
+        # timeline to match the POST-compose (effective) video timeline,
+        # which is `duration_sec - xfade_in_comp` per compensated scene.
+        # Scene 0 is never compensated (no previous scene to overlap).
         scene_dur_map = {}
         cumulative = 0.0
-        for scene in scenes:
+        for idx, scene in enumerate(scenes):
             sid = scene["scene_id"]
             dur = scene.get("duration_sec", 5)
-            scene_dur_map[sid] = {"start": cumulative, "dur": dur}
-            cumulative += dur
+            if idx > 0 and scene.get("transition_in") in ("dissolve", "fade_black", "fade_white"):
+                xfade_in_comp = float(scene.get("transition_duration_sec", 0))
+                effective_dur = max(0.0, dur - xfade_in_comp)
+            else:
+                effective_dur = dur
+            scene_dur_map[sid] = {"start": cumulative, "dur": effective_dur}
+            cumulative += effective_dur
         total_video_dur = cumulative
 
         # Build per-act music segments
