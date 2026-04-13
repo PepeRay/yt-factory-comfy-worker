@@ -506,11 +506,21 @@ def _zoompan_chain(z_expr, x_expr, y_expr, frames, w, h, fps):
     )
 
 
-def _run_single_image_effect(img_path, filter_complex, duration, seg_path):
+def _run_single_image_effect(img_path, filter_complex, duration, seg_path, fps=30):
     """Run ffmpeg for a single-image effect. Centralized so every effect
-    uses the same encoder flags (h264_nvenc HQ preset, yuv420p)."""
+    uses the same encoder flags (h264_nvenc HQ preset, yuv420p).
+
+    The ``-framerate {fps}`` before ``-loop 1 -i`` forces the image2 demuxer
+    to feed frames at the same rate as the zoompan output. Without it the
+    demuxer defaults to 25 fps while zoompan emits at 30 fps; the ``on``
+    counter inside zoompan advances per *input* frame so the effect finishes
+    early (only ~83% of its z range reached on a 21s scene) and the last
+    several seconds render as a static tail. Ray reported this on the 21s
+    zoom_in scene in video 0002 (2026-04-13).
+    """
     cmd = [
-        "ffmpeg", "-y", "-loop", "1", "-i", img_path,
+        "ffmpeg", "-y",
+        "-framerate", str(fps), "-loop", "1", "-i", img_path,
         "-filter_complex", filter_complex,
         "-t", f"{duration:.4f}",
         *NVENC_HQ_ARGS, "-an", seg_path,
@@ -690,7 +700,7 @@ def _render_image_effect(effect, img_a, img_b, duration, seg_path, w, h, fps):
         )
 
     print(f"[effect] {original_effect} d={duration:.2f}s")
-    return _run_single_image_effect(img_a, fc, duration, seg_path)
+    return _run_single_image_effect(img_a, fc, duration, seg_path, fps=fps)
 
 
 def _render_parallax(img_fg, img_bg, duration, seg_path, w, h, fps):
@@ -771,7 +781,11 @@ def _render_particles(img_path, particles_path, duration, seg_path, w, h, fps):
     )
     cmd = [
         "ffmpeg", "-y",
-        "-loop", "1", "-i", img_path,
+        # -framerate before -loop 1 makes the image2 demuxer feed frames at
+        # the same rate zoompan outputs, so the ``on`` counter inside zoompan
+        # stays in sync with the scene duration (see _run_single_image_effect
+        # docstring for the full rationale).
+        "-framerate", str(fps), "-loop", "1", "-i", img_path,
         "-i", particles_path,
         "-filter_complex", fc,
         "-t", f"{duration:.4f}", "-r", str(fps),
