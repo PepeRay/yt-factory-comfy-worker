@@ -1013,26 +1013,36 @@ def _compose_scene_manifest(src, dest, content_id, config, channel, platform="yo
                         if result.returncode != 0:
                             raise RuntimeError(f"segment {sid} video_clip (tail pass): {result.stderr[-200:]}")
 
-                        # Pass 3: concat demuxer — lossless stitch.
+                        # Pass 3: concat demuxer with re-encode.
+                        #
+                        # Previously used "-c copy" as the fast path with a
+                        # re-encode fallback only on non-zero return code.
+                        # Problem: concat-copy silently produced valid-looking
+                        # MP4s where the video stream stopped decoding at the
+                        # splice point (due to SPS/PPS mismatch between the
+                        # normalized Wan clip and the NVENC_HQ tail), while the
+                        # container still advertised the full duration. The
+                        # fallback never triggered because ffmpeg returned 0.
+                        # Downstream effect: the final Phase 2 concat inherited
+                        # fragile splice points from every video_clip segment
+                        # and truncated the merged video ~13-14s before the
+                        # end of the scene manifest. See decisions/log.md
+                        # 2026-04-13 Fix H.
+                        #
+                        # Fix: always re-encode Pass 3 through NVENC_NORM_ARGS
+                        # so the emitted segment has uniform codec metadata
+                        # from the first frame to the last.
                         with open(concat_list, "w") as f:
                             f.write(f"file '{os.path.basename(clip_seg)}'\n")
                             f.write(f"file '{os.path.basename(tail_seg)}'\n")
                         cmd_concat = [
                             "ffmpeg", "-y", "-f", "concat", "-safe", "0",
-                            "-i", concat_list, "-c", "copy", seg_path,
+                            "-i", concat_list, "-r", str(FPS),
+                            *NVENC_NORM_ARGS, "-an", seg_path,
                         ]
-                        cc_res = subprocess.run(cmd_concat, capture_output=True, text=True, timeout=60)
+                        cc_res = _run_ffmpeg_with_nvenc_fallback(cmd_concat, timeout=180, label=f"video_clip_norm sid={sid} (concat)")
                         if cc_res.returncode != 0:
-                            # Fallback: re-encode the concat if copy fails
-                            # (e.g. slight timebase mismatch).
-                            cmd_concat_re = [
-                                "ffmpeg", "-y", "-f", "concat", "-safe", "0",
-                                "-i", concat_list, "-r", str(FPS),
-                                *NVENC_NORM_ARGS, "-an", seg_path,
-                            ]
-                            cc_res = _run_ffmpeg_with_nvenc_fallback(cmd_concat_re, timeout=120, label=f"video_clip_norm sid={sid} (concat reencode)")
-                            if cc_res.returncode != 0:
-                                raise RuntimeError(f"segment {sid} video_clip (concat): {cc_res.stderr[-200:]}")
+                            raise RuntimeError(f"segment {sid} video_clip (concat): {cc_res.stderr[-300:]}")
 
                         # Cleanup intermediates (best effort).
                         for _tmp in (clip_seg, tail_seg, tail_png, concat_list):
@@ -1242,28 +1252,39 @@ def _compose_scene_manifest(src, dest, content_id, config, channel, platform="yo
         t_dur = scene.get("transition_duration_sec", 0)
 
         if transition == "cut" or t_dur <= 0:
-            # Simple concat (no re-encode)
+            # Concat with re-encode (previously -c copy + re-encode fallback,
+            # but the fallback never triggered on silent truncation).
+            #
+            # Root cause: segments coming out of Phase 1 have slightly
+            # different codec metadata depending on which render path
+            # produced them — _run_single_image_effect (NVENC_HQ), crossfade
+            # branch (NVENC_HQ), video_clip branch (NVENC_NORM + Pass 3
+            # concat). Even when `-c copy` returned 0, downstream muxing
+            # dropped frames at splices where SPS/PPS didn't match, causing
+            # the merged video stream to stop decoding 10-15s before the
+            # container duration.
+            #
+            # Fix: always re-encode the concat through NVENC_HQ so every
+            # splice point gets fresh, uniform codec metadata. Cost is
+            # ~10-15% longer compose; benefit is a final video whose
+            # video-stream duration matches the sum of scene durations.
+            # See decisions/log.md 2026-04-13 Fix H.
             concat_out = os.path.join(segments_dir, f"merged_{i:04d}.mp4")
             concat_list = os.path.join(segments_dir, f"concat_{i}.txt")
             with open(concat_list, "w") as f:
                 f.write(f"file '{merged_path}'\nfile '{seg['path']}'\n")
             cmd = [
                 "ffmpeg", "-y", "-f", "concat", "-safe", "0",
-                "-i", concat_list, "-c", "copy", concat_out
+                "-i", concat_list, "-r", str(FPS),
+                *NVENC_HQ_ARGS, "-an", concat_out,
             ]
-            result = subprocess.run(cmd, capture_output=True, text=True, timeout=300)
-            os.remove(concat_list)
-            if result.returncode != 0:
-                print(f"WARN: concat {i} failed, trying re-encode")
-                cmd = [
-                    "ffmpeg", "-y", "-f", "concat", "-safe", "0",
-                    "-i", concat_list, *NVENC_HQ_ARGS, concat_out
-                ]
-                # Recreate concat list for retry
-                with open(concat_list, "w") as f:
-                    f.write(f"file '{merged_path}'\nfile '{seg['path']}'\n")
-                result = _run_ffmpeg_with_nvenc_fallback(cmd, timeout=300, label=f"concat_reencode {i}")
+            result = _run_ffmpeg_with_nvenc_fallback(cmd, timeout=600, label=f"phase2_concat {i}")
+            try:
                 os.remove(concat_list)
+            except OSError:
+                pass
+            if result.returncode != 0:
+                raise RuntimeError(f"Phase 2 concat {i} failed: {result.stderr[-300:]}")
             merged_path = concat_out
         else:
             # xfade transition (dissolve, fadeblack, fadewhite)
