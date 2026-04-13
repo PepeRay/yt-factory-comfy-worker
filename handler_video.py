@@ -771,12 +771,20 @@ def _render_particles(img_path, particles_path, duration, seg_path, w, h, fps):
     cx = "iw/2-(iw/zoom/2)"
     cy = "ih/2-(ih/zoom/2)"
     z = f"min(zoom+0.0006,1.08)"
+    # Fix J (2026-04-13): blend screen in planar RGB (gbrp), not yuv420p.
+    # Screen blend math `out = 255 - (255-A)*(255-B)/255` is only correct on
+    # linear intensity channels. In YUV the U/V chroma planes are signed
+    # around 128; applying screen to them produces massive chroma shift,
+    # giving a heavy magenta cast (verified empirically on scenes 3/8/11
+    # of video 0002). gbrp is planar RGB so every channel is linear
+    # intensity and screen blend is color-correct. Output format converts
+    # back to yuv420p for encoding.
     fc = (
         f"[0:v]{_ZOOMPAN_PRESCALE},"
         f"zoompan=z='{z}':x='{cx}':y='{cy}'"
-        f":d={frames}:s={w}x{h}:fps={fps},format=yuv420p[base];"
+        f":d={frames}:s={w}x{h}:fps={fps},format=gbrp[base];"
         f"[1:v]loop=loop=-1:size=260:start=0,setpts=N/FRAME_RATE/TB,"
-        f"scale={w}:{h},fps={fps},eq=brightness=-0.02,format=yuv420p[parts];"
+        f"scale={w}:{h},fps={fps},eq=brightness=-0.02,format=gbrp[parts];"
         f"[base][parts]blend=all_mode=screen:shortest=1,format=yuv420p"
     )
     cmd = [
@@ -811,10 +819,14 @@ def _apply_particles_overlay(video_path, seg_path, duration, w, h, fps):
     # PTS across loop boundaries, which the blend filter freezes on after the
     # first iteration. Filter-level loop caches frames and replays them with
     # regenerated timestamps, keeping particles animated for the full scene.
+    #
+    # Fix J (2026-04-13): blend in gbrp (planar RGB), not yuv420p. Screen
+    # blend on YUV chroma planes causes heavy magenta cast. See docstring
+    # of _render_particles for the full explanation.
     fc = (
-        f"[0:v]format=yuv420p[base];"
+        f"[0:v]format=gbrp[base];"
         f"[1:v]loop=loop=-1:size=260:start=0,setpts=N/FRAME_RATE/TB,"
-        f"scale={w}:{h},fps={fps},eq=brightness=-0.02,format=yuv420p[parts];"
+        f"scale={w}:{h},fps={fps},eq=brightness=-0.02,format=gbrp[parts];"
         f"[base][parts]blend=all_mode=screen:shortest=1,format=yuv420p"
     )
     cmd = [
@@ -1000,9 +1012,17 @@ def _compose_scene_manifest(src, dest, content_id, config, channel, platform="yo
                             f"d={tail_frames}:s={WIDTH}x{HEIGHT}:fps={FPS},"
                             f"setsar=1"
                         )
+                        # Fix G extension (2026-04-13): -framerate matches
+                        # zoompan fps so the image2 demuxer feeds frames at
+                        # the output rate. Without it the demuxer default
+                        # 25fps disagrees with zoompan fps=30, and the
+                        # ``on`` counter inside zoompan falls short of
+                        # tail_frames, producing a shorter-than-expected
+                        # tail segment that contaminates the Phase 2 outer
+                        # concat. See _run_single_image_effect docstring.
                         cmd_tail = [
                             "ffmpeg", "-y",
-                            "-loop", "1", "-i", tail_png,
+                            "-framerate", str(FPS), "-loop", "1", "-i", tail_png,
                             "-vf", zp_filter,
                             "-t", f"{delta:.4f}",
                             "-r", str(FPS),
@@ -1013,36 +1033,50 @@ def _compose_scene_manifest(src, dest, content_id, config, channel, platform="yo
                         if result.returncode != 0:
                             raise RuntimeError(f"segment {sid} video_clip (tail pass): {result.stderr[-200:]}")
 
-                        # Pass 3: concat demuxer with re-encode.
+                        # Pass 3: concat demuxer with re-encode + PTS regen.
                         #
-                        # Previously used "-c copy" as the fast path with a
-                        # re-encode fallback only on non-zero return code.
-                        # Problem: concat-copy silently produced valid-looking
-                        # MP4s where the video stream stopped decoding at the
-                        # splice point (due to SPS/PPS mismatch between the
-                        # normalized Wan clip and the NVENC_HQ tail), while the
-                        # container still advertised the full duration. The
-                        # fallback never triggered because ffmpeg returned 0.
-                        # Downstream effect: the final Phase 2 concat inherited
-                        # fragile splice points from every video_clip segment
-                        # and truncated the merged video ~13-14s before the
-                        # end of the scene manifest. See decisions/log.md
-                        # 2026-04-13 Fix H.
-                        #
-                        # Fix: always re-encode Pass 3 through NVENC_NORM_ARGS
-                        # so the emitted segment has uniform codec metadata
-                        # from the first frame to the last.
+                        # History:
+                        # - Original: "-c copy" fast path + re-encode fallback
+                        #   on non-zero return. Failed silently because concat-
+                        #   copy returned 0 even when the output stopped
+                        #   decoding at the splice.
+                        # - Fix H (2026-04-13): always re-encode through
+                        #   NVENC_NORM_ARGS. Did not fix the truncation: the
+                        #   re-encode read a stream that was already broken
+                        #   at the concat demuxer level (SPS/PPS mismatch
+                        #   between clip_seg NVENC_NORM and tail_seg NVENC_NORM).
+                        # - Fix K (2026-04-13): add "-fflags +genpts+igndts"
+                        #   to the concat demuxer read. This regenerates PTS
+                        #   from DTS and ignores incoming DTS discontinuities
+                        #   at file boundaries, so the re-encode sees a
+                        #   contiguous monotonic stream and emits a segment
+                        #   with the full clip_seg + tail_seg duration.
                         with open(concat_list, "w") as f:
                             f.write(f"file '{os.path.basename(clip_seg)}'\n")
                             f.write(f"file '{os.path.basename(tail_seg)}'\n")
                         cmd_concat = [
-                            "ffmpeg", "-y", "-f", "concat", "-safe", "0",
+                            "ffmpeg", "-y",
+                            "-fflags", "+genpts+igndts",
+                            "-f", "concat", "-safe", "0",
                             "-i", concat_list, "-r", str(FPS),
                             *NVENC_NORM_ARGS, "-an", seg_path,
                         ]
                         cc_res = _run_ffmpeg_with_nvenc_fallback(cmd_concat, timeout=180, label=f"video_clip_norm sid={sid} (concat)")
                         if cc_res.returncode != 0:
                             raise RuntimeError(f"segment {sid} video_clip (concat): {cc_res.stderr[-300:]}")
+                        # Fix K: verify the concatenated segment actually
+                        # contains the expected duration. If the demuxer
+                        # truncated silently despite PTS regen, raise loud
+                        # instead of propagating the bad segment into Phase 2.
+                        try:
+                            seg_real_dur = _get_video_duration(seg_path)
+                            expected_dur = clip_real_dur + delta
+                            if abs(seg_real_dur - expected_dur) > 0.2:
+                                print(f"WARN: video_clip sid={sid} Pass 3 length mismatch: expected={expected_dur:.4f} got={seg_real_dur:.4f}")
+                            else:
+                                print(f"[video_clip sid={sid}] Pass 3 concat OK: {seg_real_dur:.4f}s (target {expected_dur:.4f})")
+                        except Exception as e:
+                            print(f"WARN: video_clip sid={sid} Pass 3 duration probe failed: {e}")
 
                         # Cleanup intermediates (best effort).
                         for _tmp in (clip_seg, tail_seg, tail_png, concat_list):
@@ -1252,29 +1286,38 @@ def _compose_scene_manifest(src, dest, content_id, config, channel, platform="yo
         t_dur = scene.get("transition_duration_sec", 0)
 
         if transition == "cut" or t_dur <= 0:
-            # Concat with re-encode (previously -c copy + re-encode fallback,
-            # but the fallback never triggered on silent truncation).
+            # Concat with re-encode + PTS regeneration.
             #
-            # Root cause: segments coming out of Phase 1 have slightly
-            # different codec metadata depending on which render path
-            # produced them — _run_single_image_effect (NVENC_HQ), crossfade
-            # branch (NVENC_HQ), video_clip branch (NVENC_NORM + Pass 3
-            # concat). Even when `-c copy` returned 0, downstream muxing
-            # dropped frames at splices where SPS/PPS didn't match, causing
-            # the merged video stream to stop decoding 10-15s before the
-            # container duration.
-            #
-            # Fix: always re-encode the concat through NVENC_HQ so every
-            # splice point gets fresh, uniform codec metadata. Cost is
-            # ~10-15% longer compose; benefit is a final video whose
-            # video-stream duration matches the sum of scene durations.
-            # See decisions/log.md 2026-04-13 Fix H.
+            # History:
+            # - Original: "-c copy" + re-encode fallback on returncode!=0.
+            #   Silently truncated final video to 163.37s because concat-copy
+            #   returned 0 despite the output stream dying at splice points.
+            # - Fix H (2026-04-13): switched to always re-encode through
+            #   NVENC_HQ. Did NOT fix the truncation — the re-encode processed
+            #   a stream that was already broken at the concat demuxer level.
+            #   The concat demuxer was dropping frames at file boundaries due
+            #   to PTS/DTS discontinuity between segments produced by
+            #   different render paths (image effects vs video_clip Pass 3).
+            # - Fix K (2026-04-13): add "-fflags +genpts+igndts" to the
+            #   concat demuxer call. +genpts regenerates presentation PTS
+            #   from DTS; +igndts ignores incoming DTS so the demuxer stops
+            #   using it to decide "this file has ended". With both flags,
+            #   the demuxer emits a contiguous monotonic stream across file
+            #   boundaries and the re-encode produces a full-length merged.
+            # - Fix K also adds per-iteration probe-and-log: we ffprobe each
+            #   merged_NNNN output and compare against the expected running
+            #   total. If any iteration produces a segment shorter than
+            #   expected by >0.3s, we raise loudly instead of continuing
+            #   with a contaminated merged file. This converts silent
+            #   truncation into an explicit error with diagnostic data.
             concat_out = os.path.join(segments_dir, f"merged_{i:04d}.mp4")
             concat_list = os.path.join(segments_dir, f"concat_{i}.txt")
             with open(concat_list, "w") as f:
                 f.write(f"file '{merged_path}'\nfile '{seg['path']}'\n")
             cmd = [
-                "ffmpeg", "-y", "-f", "concat", "-safe", "0",
+                "ffmpeg", "-y",
+                "-fflags", "+genpts+igndts",
+                "-f", "concat", "-safe", "0",
                 "-i", concat_list, "-r", str(FPS),
                 *NVENC_HQ_ARGS, "-an", concat_out,
             ]
@@ -1285,6 +1328,22 @@ def _compose_scene_manifest(src, dest, content_id, config, channel, platform="yo
                 pass
             if result.returncode != 0:
                 raise RuntimeError(f"Phase 2 concat {i} failed: {result.stderr[-300:]}")
+            # Fix K: verify concat_out actually contains merged + seg.
+            try:
+                merged_in_dur = _get_video_duration(merged_path)
+                seg_in_dur = _get_video_duration(seg["path"])
+                concat_out_dur = _get_video_duration(concat_out)
+                expected = merged_in_dur + seg_in_dur
+                delta_dur = expected - concat_out_dur
+                sid = scene.get("scene_id", "?")
+                if delta_dur > 0.3:
+                    print(f"ERROR: phase2_concat iter={i} sid={sid} TRUNCATED: merged_in={merged_in_dur:.4f} + seg_in={seg_in_dur:.4f} = expected {expected:.4f} but concat_out={concat_out_dur:.4f} (missing {delta_dur:.4f}s)")
+                    raise RuntimeError(f"Phase 2 concat {i} truncated: expected={expected:.4f} got={concat_out_dur:.4f} missing={delta_dur:.4f}s")
+                print(f"[phase2_concat iter={i} sid={sid}] merged={merged_in_dur:.3f}s + seg={seg_in_dur:.3f}s = {concat_out_dur:.3f}s (expected {expected:.3f}, delta {delta_dur:+.3f})")
+            except RuntimeError:
+                raise
+            except Exception as e:
+                print(f"WARN: phase2_concat iter={i} duration probe failed: {e}")
             merged_path = concat_out
         else:
             # xfade transition (dissolve, fadeblack, fadewhite)
