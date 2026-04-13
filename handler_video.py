@@ -1377,13 +1377,83 @@ def _compose_scene_manifest(src, dest, content_id, config, channel, platform="yo
 
     print(f"Phase 2 done: transitions applied")
 
-    # ── Phase 2.5: Safety net — pad merged video to match total_duration_sec ──
-    # Guarantees video length >= narration target regardless of what Director emits.
-    target_total = _parse_time_to_seconds(scenes_data.get("total_duration_sec"))
+    # ── Phase 2.5: Safety net — pad merged video to match audio length ──
+    #
+    # Fix L1 (2026-04-13): the target duration is now computed dynamically
+    # from whichever source is most reliable, in priority order:
+    #   1. The actual audio track duration (ffprobe of the narration flac).
+    #      This is the ground truth — the video stream MUST cover the audio
+    #      or the final mp4 ends with audio that has no video anchor, which
+    #      players handle by freezing the last video frame. We want the
+    #      video stream length to equal audio length exactly.
+    #   2. compose_config.total_duration_sec if the caller passes it.
+    #   3. scenes_data.total_duration_sec (legacy path, only set when scenes
+    #      came from a NV-mounted file).
+    #   4. Sum of scene durations minus xfade overlaps (fallback derivation).
+    #
+    # History: originally only option #3 existed. After the R2 migration the
+    # inline payload path stopped copying total_duration_sec into scenes_data,
+    # so Phase 2.5 silently never ran — the merged video stayed at
+    # `sum(scenes) - sum(xfade_overlaps)` length (ex: 163.26s on video 0002)
+    # while audio was 177.51s, producing a ~14s audio-only tail that players
+    # render as a frozen last frame. See decisions/log.md 2026-04-13 Fix L1.
+
+    # Resolve target total duration from the most reliable source available.
+    target_total = None
+    target_source = "none"
+
+    # Option 1: audio track duration (most reliable).
+    audio_candidates = [
+        os.path.join(dest, f"{content_id}_audio.flac"),
+        os.path.join(src, "audio", f"{content_id}_audio.flac"),
+    ]
+    for _ap in audio_candidates:
+        if os.path.exists(_ap):
+            try:
+                _adur = _get_video_duration(_ap)
+                if _adur and _adur > 0:
+                    target_total = _adur
+                    target_source = f"audio({os.path.basename(_ap)})"
+                    break
+            except Exception as e:
+                print(f"WARN: Phase 2.5 audio probe failed on {_ap}: {e}")
+
+    # Option 2: compose config top-level total_duration_sec (if caller passed it).
+    if target_total is None:
+        _cfg_total = _parse_time_to_seconds(config.get("total_duration_sec"))
+        if _cfg_total and _cfg_total > 0:
+            target_total = _cfg_total
+            target_source = "config.total_duration_sec"
+
+    # Option 3: scenes_data.total_duration_sec (legacy NV-file path).
+    if target_total is None:
+        _sd_total = _parse_time_to_seconds(scenes_data.get("total_duration_sec"))
+        if _sd_total and _sd_total > 0:
+            target_total = _sd_total
+            target_source = "scenes_data.total_duration_sec"
+
+    # Option 4: derive from scenes — sum of durations minus xfade overlaps.
+    if target_total is None:
+        try:
+            _sum = sum(float(s.get("duration_sec", 0)) for s in scenes)
+            _xfade = sum(
+                float(s.get("transition_duration_sec", 0))
+                for idx, s in enumerate(scenes)
+                if idx > 0 and s.get("transition_in") in ("dissolve", "fade_black", "fade_white")
+                and float(s.get("transition_duration_sec", 0)) > 0
+            )
+            _derived = _sum - _xfade
+            if _derived > 0:
+                target_total = _derived
+                target_source = f"derived(sum={_sum:.2f}-xfade={_xfade:.2f})"
+        except Exception as e:
+            print(f"WARN: Phase 2.5 fallback derivation failed: {e}")
+
     if target_total and target_total > 0:
         try:
             merged_real = _get_video_duration(merged_path)
             delta_total = target_total - merged_real
+            print(f"Phase 2.5: target={target_total:.4f}s (source={target_source}) merged={merged_real:.4f}s delta={delta_total:+.4f}s")
             if delta_total > 0.1:
                 safety_out = os.path.join(segments_dir, "merged_safety.mp4")
                 cmd = [
@@ -1395,7 +1465,7 @@ def _compose_scene_manifest(src, dest, content_id, config, channel, platform="yo
                 result = _run_ffmpeg_with_nvenc_fallback(cmd, timeout=600, label="phase2.5_safety")
                 if result.returncode == 0:
                     merged_path = safety_out
-                    print(f"Phase 2.5: safety pad +{delta_total:.4f}s (merged={merged_real:.4f} target={target_total:.4f})")
+                    print(f"Phase 2.5: safety pad +{delta_total:.4f}s applied (merged={merged_real:.4f} → target={target_total:.4f})")
                 else:
                     print(f"WARN: safety pad failed: {result.stderr[-200:]}")
             else:
