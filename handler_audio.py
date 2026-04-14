@@ -486,6 +486,70 @@ def handler(job):
     media_type = ACCEPTED_JOB_TYPES[job_type]
     dest = source_dir(channel, content_id, media_type)
 
+    # Fix I4c (2026-04-14): short-circuit TTS regeneration if the flac chunk
+    # already exists in R2.
+    #
+    # Problem: when the Audio Pipeline retries (e.g., after a max_tokens fix,
+    # transient HTTP error on a specific chunk, or manual re-run), it re-submits
+    # ALL chunk jobs to the endpoint — even though the previously-generated
+    # chunks are sitting in R2 at the expected key. Full scripts split into
+    # 10-20 chunks (~$0.04 + ~25 sec each). Every retry burned ~$0.50 and ~5 min
+    # regenerating bit-identical TTS output.
+    #
+    # Fix: at the top of the txt-voice job path, compute the expected R2 key
+    # and check r2_helper.file_exists(). If present, download to local dest
+    # and return immediately with a success response matching the normal shape
+    # (including r2_key, r2_url, size_mb, plus a `skipped: true` flag).
+    #
+    # Safety:
+    # - Only runs for job_type == "txt-voice" with R2 enabled and `index`
+    #   provided (the normal Audio Pipeline always provides both).
+    # - voice-srt (Whisper STT) and compose (concat_audio) are NOT short-
+    #   circuited — voice-srt regeneration is cheap (Whisper is fast) and
+    #   the SRT is single-shot per video, not per chunk.
+    # - Fail-open: any exception falls through to normal TTS (never blocks
+    #   legitimate re-generation).
+    # - Size sanity check (>= 100KB) rejects partial/corrupted R2 uploads;
+    #   on mismatch, removes the local download and proceeds with TTS.
+    # - Matches the exact pattern from handler_video.py Fix I4 / handler_images.py
+    #   Fix I4b for consistency.
+    if job_type == "txt-voice":
+        if R2_ENABLED and index is not None:
+            try:
+                index_str = f"{int(index):03d}"
+                existing_r2_key = f"{channel}/{content_id}/source/{media_type}/{prefix}_{index_str}.flac"
+                if r2_helper.file_exists(existing_r2_key):
+                    os.makedirs(dest, exist_ok=True)
+                    local_path = os.path.join(dest, f"{prefix}_{index_str}.flac")
+                    r2_helper.download_file(existing_r2_key, local_path)
+                    local_size = os.path.getsize(local_path) if os.path.exists(local_path) else 0
+                    if local_size >= 100_000:  # sanity: TTS chunks are normally 500KB-3MB
+                        print(f"[INFO] txt-voice chunk={index_str} REUSE: flac already in R2 ({local_size/1024/1024:.2f} MB), skipping TTS")
+                        return {
+                            "status": "success",
+                            "job_type": job_type,
+                            "channel": channel,
+                            "content_id": content_id,
+                            "output_dir": dest,
+                            "outputs": [{
+                                "filename": f"{prefix}_{index_str}.flac",
+                                "path": local_path,
+                                "node_id": "reused_from_r2",
+                                "size_mb": round(local_size / 1024 / 1024, 2),
+                                "r2_key": existing_r2_key,
+                                "r2_url": r2_helper.presigned_url(existing_r2_key),
+                                "skipped": True,
+                            }],
+                        }
+                    else:
+                        print(f"[WARN] txt-voice chunk={index_str} flac in R2 but local download size={local_size} < 100KB, re-generating")
+                        try:
+                            os.remove(local_path)
+                        except OSError:
+                            pass
+            except Exception as e:
+                print(f"[WARN] txt-voice R2 existence check failed ({e}), proceeding with TTS")
+
     try:
         wait_for_comfyui()
     except RuntimeError as e:
