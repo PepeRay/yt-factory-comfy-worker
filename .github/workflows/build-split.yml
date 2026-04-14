@@ -66,6 +66,8 @@ jobs:
     permissions:
       contents: read
       packages: write
+    outputs:
+      image_tag: ${{ steps.meta.outputs.image_tag }}
     steps:
       - uses: actions/checkout@v4
 
@@ -87,6 +89,11 @@ jobs:
             ${{ env.IMAGE_PREFIX }}-audio:${{ github.sha }}
           cache-from: type=gha,scope=audio
           cache-to: type=gha,mode=max,scope=audio
+
+      - name: Expose image tag for downstream jobs
+        id: meta
+        run: |
+          echo "image_tag=${{ env.IMAGE_PREFIX }}-audio:${{ github.sha }}" >> "$GITHUB_OUTPUT"
 
   build-images:
     needs: changes
@@ -172,19 +179,91 @@ jobs:
         run: |
           echo "image_tag=${{ env.IMAGE_PREFIX }}-video:${{ github.sha }}" >> "$GITHUB_OUTPUT"
 
+  update-runpod-audio:
+    # Auto-updates the RunPod audio template (id lnri07h5s2) when build-audio
+    # succeeds. Uses RunPod REST API (PATCH /v1/templates/{id}) — atomic, only
+    # touches imageName, no risk of wiping env vars (unlike the GraphQL
+    # saveTemplate mutation which requires all fields).
+    # Pins by full commit SHA (40 chars), never :latest — policy 2026-04-13.
+    # Verifies image exists in GHCR before patching to fail fast on bad tags.
+    # Note about Images: not auto-updated here because the images template
+    # currently points to a -base image (not the monolithic CI-built image),
+    # and switching to the monolithic requires a manual validation cycle that
+    # has not been done yet. Pending tech debt — see Arquitectura Técnica backlog.
+    needs: build-audio
+    if: needs.build-audio.result == 'success'
+    runs-on: ubuntu-latest
+    steps:
+      - name: Verify image exists in GHCR + PATCH RunPod audio template
+        env:
+          RUNPOD_API_KEY: ${{ secrets.RUNPOD_API_KEY }}
+          GHCR_PULL_TOKEN: ${{ secrets.GITHUB_TOKEN }}
+          TEMPLATE_ID: lnri07h5s2
+          NEW_IMAGE: ${{ needs.build-audio.outputs.image_tag }}
+        run: |
+          set -euo pipefail
+
+          if [ -z "${RUNPOD_API_KEY:-}" ]; then
+            echo "ERROR: RUNPOD_API_KEY secret is missing"
+            exit 1
+          fi
+
+          # Extract <repo>:<tag> from full image string (drop ghcr.io/ prefix)
+          REPO_TAG="${NEW_IMAGE#ghcr.io/}"
+          REPO="${REPO_TAG%:*}"
+          TAG="${REPO_TAG##*:}"
+          echo "Verifying ${REPO}:${TAG} exists in GHCR..."
+
+          GHCR_TOKEN=$(curl -sS -u "x:${GHCR_PULL_TOKEN}" \
+            "https://ghcr.io/token?service=ghcr.io&scope=repository:${REPO}:pull" | jq -r '.token')
+
+          HTTP_CODE=$(curl -sS -o /dev/null -w "%{http_code}" -I \
+            -H "Authorization: Bearer ${GHCR_TOKEN}" \
+            -H "Accept: application/vnd.oci.image.index.v1+json,application/vnd.docker.distribution.manifest.v2+json" \
+            "https://ghcr.io/v2/${REPO}/manifests/${TAG}")
+
+          if [ "$HTTP_CODE" != "200" ]; then
+            echo "ERROR: Image ${NEW_IMAGE} not found in GHCR (HTTP ${HTTP_CODE})"
+            exit 1
+          fi
+          echo "✓ Image manifest found in GHCR"
+
+          echo "PATCHing RunPod audio template (id=${TEMPLATE_ID})..."
+          PATCH_BODY=$(jq -cn --arg img "$NEW_IMAGE" '{imageName: $img}')
+
+          RESPONSE=$(curl -sS -X PATCH "https://rest.runpod.io/v1/templates/${TEMPLATE_ID}" \
+            -H "Authorization: Bearer ${RUNPOD_API_KEY}" \
+            -H "Content-Type: application/json" \
+            -d "$PATCH_BODY")
+
+          UPDATED_IMAGE=$(echo "$RESPONSE" | jq -r '.imageName // empty')
+          if [ "$UPDATED_IMAGE" != "$NEW_IMAGE" ]; then
+            echo "ERROR: PATCH did not apply correctly"
+            echo "Expected: ${NEW_IMAGE}"
+            echo "Got     : ${UPDATED_IMAGE}"
+            echo "Response: ${RESPONSE}" | jq -r 'del(.env)'
+            exit 1
+          fi
+
+          echo "=== RunPod audio template updated successfully ==="
+          echo "Template ID  : ${TEMPLATE_ID}"
+          echo "New imageName: ${UPDATED_IMAGE}"
+
   update-runpod-video:
     # Auto-updates the RunPod video template (id 5ejm0u3xrt) when build-video
-    # succeeds. Uses GraphQL query+mutation preserving all template fields,
-    # only changing imageName to the new SHA tag. Only touches the video
-    # template — audio and images templates still point to base images and
-    # are NOT updated here.
+    # succeeds. Migrated from GraphQL saveTemplate to REST PATCH 2026-04-14
+    # for consistency with update-runpod-audio. REST is atomic (only touches
+    # imageName), simpler, and removes the landmine of GraphQL saveTemplate
+    # requiring all fields (omitting env wipes variables).
+    # Pins by full commit SHA (40 chars), never :latest.
     needs: build-video
     if: needs.build-video.result == 'success'
     runs-on: ubuntu-latest
     steps:
-      - name: Update RunPod video template imageName
+      - name: Verify image exists in GHCR + PATCH RunPod video template
         env:
           RUNPOD_API_KEY: ${{ secrets.RUNPOD_API_KEY }}
+          GHCR_PULL_TOKEN: ${{ secrets.GITHUB_TOKEN }}
           TEMPLATE_ID: 5ejm0u3xrt
           NEW_IMAGE: ${{ needs.build-video.outputs.image_tag }}
         run: |
@@ -195,61 +274,42 @@ jobs:
             exit 1
           fi
 
-          echo "Fetching current video template (id=${TEMPLATE_ID})..."
-          QUERY_BODY=$(jq -cn --arg id "$TEMPLATE_ID" '{
-            query: "query Template($id: String!) { podTemplate(id: $id) { id name imageName containerDiskInGb volumeInGb volumeMountPath dockerArgs ports isServerless readme env { key value } } }",
-            variables: { id: $id }
-          }')
+          REPO_TAG="${NEW_IMAGE#ghcr.io/}"
+          REPO="${REPO_TAG%:*}"
+          TAG="${REPO_TAG##*:}"
+          echo "Verifying ${REPO}:${TAG} exists in GHCR..."
 
-          RESPONSE=$(curl -sS -X POST "https://api.runpod.io/graphql?api_key=${RUNPOD_API_KEY}" \
+          GHCR_TOKEN=$(curl -sS -u "x:${GHCR_PULL_TOKEN}" \
+            "https://ghcr.io/token?service=ghcr.io&scope=repository:${REPO}:pull" | jq -r '.token')
+
+          HTTP_CODE=$(curl -sS -o /dev/null -w "%{http_code}" -I \
+            -H "Authorization: Bearer ${GHCR_TOKEN}" \
+            -H "Accept: application/vnd.oci.image.index.v1+json,application/vnd.docker.distribution.manifest.v2+json" \
+            "https://ghcr.io/v2/${REPO}/manifests/${TAG}")
+
+          if [ "$HTTP_CODE" != "200" ]; then
+            echo "ERROR: Image ${NEW_IMAGE} not found in GHCR (HTTP ${HTTP_CODE})"
+            exit 1
+          fi
+          echo "✓ Image manifest found in GHCR"
+
+          echo "PATCHing RunPod video template (id=${TEMPLATE_ID})..."
+          PATCH_BODY=$(jq -cn --arg img "$NEW_IMAGE" '{imageName: $img}')
+
+          RESPONSE=$(curl -sS -X PATCH "https://rest.runpod.io/v1/templates/${TEMPLATE_ID}" \
+            -H "Authorization: Bearer ${RUNPOD_API_KEY}" \
             -H "Content-Type: application/json" \
-            -d "$QUERY_BODY")
+            -d "$PATCH_BODY")
 
-          echo "Query response:"
-          echo "$RESPONSE" | jq '.data.podTemplate | {id, name, imageName, containerDiskInGb, volumeInGb, envCount: (.env | length)}'
-
-          if ! echo "$RESPONSE" | jq -e '.data.podTemplate' > /dev/null; then
-            echo "ERROR: Failed to fetch template. Full response:"
-            echo "$RESPONSE"
+          UPDATED_IMAGE=$(echo "$RESPONSE" | jq -r '.imageName // empty')
+          if [ "$UPDATED_IMAGE" != "$NEW_IMAGE" ]; then
+            echo "ERROR: PATCH did not apply correctly"
+            echo "Expected: ${NEW_IMAGE}"
+            echo "Got     : ${UPDATED_IMAGE}"
+            echo "Response: ${RESPONSE}" | jq -r 'del(.env)'
             exit 1
           fi
 
-          echo "Building mutation input with new imageName=${NEW_IMAGE}..."
-          MUTATION_BODY=$(echo "$RESPONSE" | jq -c --arg new "$NEW_IMAGE" '
-            .data.podTemplate as $t
-            | {
-                query: "mutation SaveTemplate($input: SaveTemplateInput!) { saveTemplate(input: $input) { id name imageName } }",
-                variables: {
-                  input: {
-                    id: $t.id,
-                    name: $t.name,
-                    imageName: $new,
-                    containerDiskInGb: $t.containerDiskInGb,
-                    volumeInGb: $t.volumeInGb,
-                    volumeMountPath: $t.volumeMountPath,
-                    dockerArgs: $t.dockerArgs,
-                    ports: $t.ports,
-                    isServerless: $t.isServerless,
-                    readme: $t.readme,
-                    env: ($t.env | map({key, value}))
-                  }
-                }
-              }
-          ')
-
-          MUTATION_RESPONSE=$(curl -sS -X POST "https://api.runpod.io/graphql?api_key=${RUNPOD_API_KEY}" \
-            -H "Content-Type: application/json" \
-            -d "$MUTATION_BODY")
-
-          echo "Mutation response:"
-          echo "$MUTATION_RESPONSE"
-
-          if ! echo "$MUTATION_RESPONSE" | jq -e '.data.saveTemplate.id' > /dev/null; then
-            echo "ERROR: saveTemplate mutation failed"
-            exit 1
-          fi
-
-          UPDATED_IMAGE=$(echo "$MUTATION_RESPONSE" | jq -r '.data.saveTemplate.imageName')
           echo "=== RunPod video template updated successfully ==="
-          echo "Template ID: ${TEMPLATE_ID}"
+          echo "Template ID  : ${TEMPLATE_ID}"
           echo "New imageName: ${UPDATED_IMAGE}"
