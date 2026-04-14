@@ -396,6 +396,71 @@ def handler(job):
     media_type = ACCEPTED_JOB_TYPES[job_type]
     dest = source_dir(channel, content_id, media_type)
 
+    # Fix I4b (2026-04-14): short-circuit Flux image regeneration if already in R2.
+    #
+    # Problem: when the Image Pipeline retries (after a partial ComfyUI failure,
+    # RunPod cold-start timeout, a zombie worker, or any transient error), it
+    # re-submits ALL scene frames to RunPod for fresh Flux generation — even
+    # though images from the previous run are still sitting in R2 at the
+    # expected key. A 49-scene video has ~83 frames at ~15s each. Retries were
+    # burning ~$0.50 and ~20 min of wasted compute per attempt just to
+    # regenerate images that already existed.
+    #
+    # Fix: at the very top of the txt-img job path, compute the expected output
+    # R2 key (post-collect_and_move naming: `{prefix}.png` for refined-last,
+    # which matches the `filename_suffix` passed from Build Image Payload — e.g.
+    # `scene_000_initial` or `scene_000_final`) and check if it exists. If yes,
+    # download it to the local dest dir and return immediately with a success
+    # response that mirrors the normal shape. If no, proceed with the full
+    # ComfyUI + Flux generation flow as before.
+    #
+    # Safety:
+    # - Only runs when R2 is enabled and `prefix` is non-empty. Each txt-img
+    #   job generates ONE logical frame (initial OR final), so a single R2 key
+    #   check is sufficient.
+    # - Skips when `overlay_text` is provided (thumbnail path does
+    #   post-processing + text overlay that must run fresh).
+    # - Exceptions in the check fall through to the normal flow (fail-open —
+    #   never blocks legitimate re-generation).
+    # - Sets `skipped: True` in the result entry so downstream tools / telemetry
+    #   can distinguish regenerated vs reused frames.
+    if job_type == "txt-img" and R2_ENABLED and prefix and not job_input.get("overlay_text"):
+        try:
+            existing_r2_key = f"{channel}/{content_id}/source/{media_type}/{prefix}.png"
+            if r2_helper.file_exists(existing_r2_key):
+                os.makedirs(dest, exist_ok=True)
+                local_path = os.path.join(dest, f"{prefix}.png")
+                r2_helper.download_file(existing_r2_key, local_path)
+                local_size = os.path.getsize(local_path) if os.path.exists(local_path) else 0
+                if local_size >= 50_000:  # sanity: Flux images are normally 0.5-3 MB
+                    print(f"[INFO] txt-img sid={prefix} REUSE: image already in R2 ({local_size/1024:.1f} KB), skipping Flux gen")
+                    return {
+                        "status": "success",
+                        "job_type": job_type,
+                        "channel": channel,
+                        "content_id": content_id,
+                        "output_dir": dest,
+                        "outputs": [{
+                            "filename": f"{prefix}.png",
+                            "path": local_path,
+                            "node_id": "reused_from_r2",
+                            "size_mb": round(local_size / 1024 / 1024, 2),
+                            "r2_key": existing_r2_key,
+                            "r2_url": r2_helper.presigned_url(existing_r2_key),
+                            "skipped": True,
+                        }],
+                        "overlay_applied": False,
+                        "thumbnail_b64": None,
+                    }
+                else:
+                    print(f"[WARN] txt-img sid={prefix} image in R2 but local download size={local_size} < 50KB, re-generating")
+                    try:
+                        os.remove(local_path)
+                    except OSError:
+                        pass
+        except Exception as e:
+            print(f"[WARN] txt-img R2 existence check failed ({e}), proceeding with Flux gen")
+
     try:
         wait_for_comfyui()
     except RuntimeError as e:
