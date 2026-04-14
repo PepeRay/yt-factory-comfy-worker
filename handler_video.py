@@ -1949,9 +1949,66 @@ def handler(job):
     media_type = ACCEPTED_JOB_TYPES[job_type]
     dest = source_dir(channel, content_id, media_type)
 
-    # Pre-download scene images from R2 to /comfyui/input/
-    # (Wan 2.2 I2V LoadImage nodes need files in ComfyUI's default input dir)
+    # Fix I4 (2026-04-14): short-circuit Wan regeneration if clip already exists in R2.
+    #
+    # Problem: when the Video Pipeline retries (after a compose timeout, Poll Compose
+    # failure, or any transient error), it re-submits ALL video_clip scenes to
+    # RunPod for fresh Wan generation — even though the clips from the previous run
+    # are still sitting in R2 at the expected key. A full-length video has 8+
+    # video_clip scenes at ~$0.12 each + ~2 min per clip. Retries were burning
+    # ~$1 and ~15 min of wasted compute per attempt.
+    #
+    # Fix: at the very top of the img-vid job path, compute the expected output R2
+    # key and check if it exists. If yes, download to the local dest dir and return
+    # immediately with a success response that mirrors the normal shape. If no,
+    # proceed with the full ComfyUI + Wan generation flow as before.
+    #
+    # Safety:
+    # - Only runs when R2 is enabled and `index` (scene_id) is provided — the normal
+    #   Video Pipeline always provides both.
+    # - Exceptions in the check fall through to the normal flow (fail-open, never
+    #   blocks legitimate re-generation).
+    # - Sets `skipped: True` in the result entry so downstream tools / telemetry
+    #   can distinguish regenerated vs reused clips.
     if job_type == "img-vid":
+        if R2_ENABLED and index is not None:
+            try:
+                sid_str = f"{int(index):03d}"
+                existing_r2_key = f"{channel}/{content_id}/source/{ACCEPTED_JOB_TYPES[job_type]}/{prefix}_{sid_str}.mp4"
+                if r2_helper.file_exists(existing_r2_key):
+                    os.makedirs(dest, exist_ok=True)
+                    local_path = os.path.join(dest, f"{prefix}_{sid_str}.mp4")
+                    r2_helper.download_file(existing_r2_key, local_path)
+                    local_size = os.path.getsize(local_path) if os.path.exists(local_path) else 0
+                    if local_size >= 1_000_000:  # sanity: Wan clips are normally 5-30 MB
+                        print(f"[INFO] img-vid sid={sid_str} REUSE: clip already in R2 ({local_size/1024/1024:.2f} MB), skipping Wan gen")
+                        return {
+                            "status": "success",
+                            "job_type": job_type,
+                            "channel": channel,
+                            "content_id": content_id,
+                            "output_dir": dest,
+                            "outputs": [{
+                                "filename": f"{prefix}_{sid_str}.mp4",
+                                "path": local_path,
+                                "node_id": "reused_from_r2",
+                                "size_mb": round(local_size / 1024 / 1024, 2),
+                                "r2_key": existing_r2_key,
+                                "r2_url": r2_helper.presigned_url(existing_r2_key),
+                                "skipped": True,
+                            }],
+                        }
+                    else:
+                        print(f"[WARN] img-vid sid={sid_str} clip in R2 but local download size={local_size} < 1MB, re-generating")
+                        try:
+                            os.remove(local_path)
+                        except OSError:
+                            pass
+            except Exception as e:
+                print(f"[WARN] img-vid R2 existence check failed ({e}), proceeding with Wan gen")
+
+        # Pre-download scene images from R2 to /comfyui/input/
+        # (Wan 2.2 I2V LoadImage nodes need files in ComfyUI's default input dir)
         _ensure_img_vid_inputs(channel, content_id)
 
     try:
