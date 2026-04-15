@@ -1,0 +1,79 @@
+# === YouTube Factory — Compose Endpoint (CPU slim) ===
+# Minimal image for CPU-only compose jobs (ffmpeg concat, xfade, overlay, mux).
+# Used by the CPU endpoint `yt-factory-cpu` (id `3zro74l0bius8u`, template
+# `eqpgeipx1x`) to run the compose phases of the Video Pipeline without
+# pulling the 30GB video image.
+#
+# Contains: python3.12-slim + ffmpeg/ffprobe + runpod/boto3/requests/websocket
+#           + handler_video.py + r2_helper.py + download_r2_inputs.py
+#           + assets/particles.mov (needed for particles overlay effect)
+#
+# Does NOT contain: ComfyUI, Wan/Flux models, PyTorch, CUDA, custom nodes.
+# All of that is unneeded for the compose code path in handler_video.py
+# (verified during the 2026-04-15 audit — compose branch is isolated from
+# ComfyUI imports, only uses subprocess ffmpeg calls + R2 I/O).
+#
+# Image size target: ~500-800 MB (vs ~30 GB for yt-factory-video). Expected
+# cold start first pull: ~30s (vs ~10-15 min for the full video image).
+# Ganancia = habilita `workersStandby=0` viable en el CPU endpoint sin
+# penalty inaceptable de cold start.
+#
+# Rebuild triggers (via .github/workflows/build-split.yml):
+#   - Dockerfile.compose
+#   - handler_video.py (shared with yt-factory-video — both rebuild on change)
+#   - r2_helper.py
+#   - download_r2_inputs.py
+#   - assets/particles.mov
+#
+# Deployment note: template `eqpgeipx1x` is NOT auto-PATCHed on push (manual
+# validation required per session 2026-04-15). After CI builds successfully,
+# Ray runs a test job manually against the new image and PATCHes the template
+# via `curl -X PATCH https://rest.runpod.io/v1/templates/eqpgeipx1x` if the
+# mp4 output passes spot check. Once proven stable, the manual step can be
+# replaced with an auto `update-runpod-compose` CI job analogous to the
+# existing update-runpod-{audio,video} jobs.
+
+FROM python:3.12-slim
+
+# ── System deps: ffmpeg + ffprobe (all codecs needed for compose phases) ──
+# libx264, libx265 (fallback), aac, libmp3lame, libopus, subtitle filters,
+# xfade transitions, overlay filter. The `ffmpeg` package from Debian
+# bookworm ships with all of these enabled by default.
+RUN apt-get update && \
+    apt-get install -y --no-install-recommends \
+        ffmpeg \
+        curl \
+        ca-certificates && \
+    rm -rf /var/lib/apt/lists/*
+
+# ── Python deps ──
+# runpod: serverless worker SDK
+# boto3: R2 client (via r2_helper)
+# requests: HTTP calls for presigned URLs + GHCR manifests
+# websocket-client: pulled in by handler_video.py imports even in compose path
+#   (module-level import; compose branch never actually connects to ws)
+RUN pip install --no-cache-dir \
+        runpod \
+        boto3 \
+        requests \
+        websocket-client
+
+# ── Handler + helpers ──
+COPY r2_helper.py /r2_helper.py
+COPY download_r2_inputs.py /download_r2_inputs.py
+COPY handler_video.py /handler.py
+
+# ── Static assets (particles overlay) ──
+# particles.mov is used by _apply_particles_overlay in handler_video.py for
+# scenes flagged with _particles_overlay=true. Compose phases need it.
+RUN mkdir -p /workspace/assets
+COPY assets/particles.mov /workspace/assets/particles.mov
+
+# No WORKDIR shuffle — handler reads absolute paths
+WORKDIR /
+
+# No ComfyUI to launch — handler runs standalone
+CMD ["python", "/handler.py"]
+
+LABEL description="YT Factory Compose — CPU slim image for ffmpeg compose jobs (no ComfyUI)"
+LABEL version="v1"
