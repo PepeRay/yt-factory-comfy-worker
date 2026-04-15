@@ -41,16 +41,18 @@ COMFY_HOST = "127.0.0.1:8188"
 COMFY_API_AVAILABLE_INTERVAL_MS = int(os.environ.get("COMFY_API_AVAILABLE_INTERVAL_MS", 500))
 COMFY_API_AVAILABLE_MAX_RETRIES = int(os.environ.get("COMFY_API_AVAILABLE_MAX_RETRIES", 480))
 COMFY_EXECUTION_TIMEOUT = int(os.environ.get("COMFY_EXECUTION_TIMEOUT", 600))
-NETWORK_VOLUME_PATH = os.environ.get("RUNPOD_NETWORK_VOLUME_PATH", "/runpod-volume")
-if os.path.isdir(NETWORK_VOLUME_PATH):
-    PROJECTS_ROOT = os.path.join(NETWORK_VOLUME_PATH, "projects")
-else:
-    PROJECTS_ROOT = "/tmp/projects"
+# NV→R2 migration completed 2026-04-15. Workers run without Network Volume
+# attached (networkVolumeId=""); PROJECTS_ROOT is always ephemeral tmpfs.
+# Historical note: the previous conditional `if os.path.isdir('/runpod-volume')`
+# fell through to a false-positive because the base image contains an empty
+# `/runpod-volume/` dir — PROJECTS_ROOT ended up on the container rootfs
+# instead of tmpfs, causing ENOSPC accumulation across reused workers
+# (lesson #44 in rules/runpod-infrastructure.md). Removed 2026-04-15.
+PROJECTS_ROOT = "/tmp/projects"
 os.makedirs(PROJECTS_ROOT, exist_ok=True)
 
 _OUTPUT_DIR_CANDIDATES = [
     "/comfyui/output",
-    f"{NETWORK_VOLUME_PATH}/ComfyUI/output",
     "/comfyui/temp",
 ]
 
@@ -857,6 +859,30 @@ def _apply_particles_overlay(video_path, seg_path, duration, w, h, fps):
 
 
 def _compose_scene_manifest(src, dest, content_id, config, channel, platform="youtube"):
+    """
+    Wrapper that guarantees cleanup of _segments/ intermediates on any exit path
+    (success, exception, timeout). Prevents ENOSPC accumulation across reused
+    workers — fixes lesson #44 (rules/runpod-infrastructure.md).
+
+    Background: RunPod may keep workers warm 1-5 min between jobs for cold-start
+    optimization. Without this cleanup, Phase 1 per-scene intermediates (100+
+    mp4/aac files, several GB total) + Phase 2 concat intermediates + `_music/`
+    + `_ambient/` accumulate under `{dest}/_segments/` across jobs until the
+    filesystem fills up. First observed 2026-04-14 with the GPU Video endpoint
+    (ENOSPC at line 1265 writing `ambient_list.txt`).
+
+    The try/finally pattern ensures cleanup runs even if the compose raises
+    mid-phase. shutil.rmtree uses ignore_errors=True so cleanup itself never
+    masks the original exception.
+    """
+    segments_dir = os.path.join(dest, "_segments")
+    try:
+        return _compose_scene_manifest_impl(src, dest, content_id, config, channel, platform)
+    finally:
+        shutil.rmtree(segments_dir, ignore_errors=True)
+
+
+def _compose_scene_manifest_impl(src, dest, content_id, config, channel, platform="youtube"):
     """
     Compose full video from scenes.json v2 manifest.
     Phase 1: Render each scene to a normalized segment (1920x1080, 30fps, h264)
@@ -1680,8 +1706,10 @@ def _compose_scene_manifest(src, dest, content_id, config, channel, platform="yo
         if result.returncode != 0:
             raise RuntimeError(f"Phase 3 mux failed: {result.stderr[-500:]}")
 
-    # Cleanup segments
-    shutil.rmtree(segments_dir, ignore_errors=True)
+    # Cleanup of segments_dir is handled by the wrapper function
+    # _compose_scene_manifest() in its try/finally block — guarantees cleanup
+    # even on Phase 1/2/3 exceptions (was only running on success path before
+    # 2026-04-15, causing the ENOSPC bug on reused workers — lesson #44).
 
     final_size = round(os.path.getsize(output_path) / 1024 / 1024, 2)
     print(f"Phase 3 done: {output_path} ({final_size} MB)")

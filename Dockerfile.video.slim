@@ -27,8 +27,6 @@ COPY handler_video.py /handler.py
 COPY start_video.sh /start.sh
 RUN chmod +x /start.sh
 
-ENV RUNPOD_NETWORK_VOLUME_PATH="/runpod-volume"
-
 CMD ["/start.sh"]
 
 LABEL description="YT Factory Video Slim — handler over yt-factory-video-base:v1"

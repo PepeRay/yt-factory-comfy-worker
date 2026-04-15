@@ -33,8 +33,6 @@ except Exception as e:
     traceback.print_exc()
 PYEOF
 
-mkdir -p /runpod-volume/jobs 2>/dev/null || true
-
 echo "Launching ComfyUI on port 8188..."
 cd /comfyui
 python main.py --listen 0.0.0.0 --port 8188 --disable-auto-launch &
