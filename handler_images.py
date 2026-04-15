@@ -35,17 +35,15 @@ COMFY_HOST = "127.0.0.1:8188"
 COMFY_API_AVAILABLE_INTERVAL_MS = int(os.environ.get("COMFY_API_AVAILABLE_INTERVAL_MS", 500))
 COMFY_API_AVAILABLE_MAX_RETRIES = int(os.environ.get("COMFY_API_AVAILABLE_MAX_RETRIES", 480))
 COMFY_EXECUTION_TIMEOUT = int(os.environ.get("COMFY_EXECUTION_TIMEOUT", 300))
-# Post-migracion NV-free: el endpoint Images tiene networkVolumeId=null
-# (verificado por GraphQL). NETWORK_VOLUME_PATH se mantiene como constante
-# por compatibilidad con _OUTPUT_DIR_CANDIDATES (zombie code inofensivo).
+# Post-migracion NV-free: el endpoint Images tiene networkVolumeId=null.
 # PROJECTS_ROOT es siempre /tmp/projects (storage efimero local).
-NETWORK_VOLUME_PATH = "/runpod-volume"
+# NETWORK_VOLUME_PATH constant y _OUTPUT_DIR_CANDIDATES NV entry removidos
+# 2026-04-15 — parte del cleanup sistémico post-migración (ver rules/runpod-infrastructure.md).
 PROJECTS_ROOT = "/tmp/projects"
 os.makedirs(PROJECTS_ROOT, exist_ok=True)
 
 _OUTPUT_DIR_CANDIDATES = [
     "/comfyui/output",
-    f"{NETWORK_VOLUME_PATH}/ComfyUI/output",
     "/comfyui/temp",
 ]
 
