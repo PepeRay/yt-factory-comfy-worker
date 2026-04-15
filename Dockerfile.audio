@@ -225,6 +225,4 @@ COPY handler_audio.py /handler.py
 COPY start_audio.sh /start.sh
 RUN chmod +x /start.sh
 
-ENV RUNPOD_NETWORK_VOLUME_PATH="/runpod-volume"
-
 CMD ["/start.sh"]

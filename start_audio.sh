@@ -3,41 +3,13 @@ set -e
 
 echo "=== YouTube Factory — Audio Endpoint ==="
 
-# Custom nodes are baked in Docker image — no NV symlinks needed
-
-if [ -d "/runpod-volume/ComfyUI" ]; then
-    echo "Network Volume detected"
-
-    # Link model directories
-    if [ -d "/runpod-volume/ComfyUI/models" ]; then
-        echo "Linking model directories..."
-        for src in /runpod-volume/ComfyUI/models/*/; do
-            [ -d "$src" ] || continue
-            dir_name=$(basename "$src")
-            dst="/comfyui/models/$dir_name"
-            if [ ! -e "$dst" ]; then
-                ln -sf "$src" "$dst"
-                echo "  ✓ Linked: $dir_name"
-            fi
-        done
-    fi
-
-    # Link input files (reference voices)
-    if [ -d "/runpod-volume/ComfyUI/input" ]; then
-        echo "Linking input files..."
-        for f in /runpod-volume/ComfyUI/input/*; do
-            [ -e "$f" ] || continue
-            fname=$(basename "$f")
-            if [ ! -e "/comfyui/input/$fname" ]; then
-                ln -sf "$f" "/comfyui/input/$fname"
-            fi
-        done
-    fi
-else
-    echo "INFO: No Network Volume — using baked models"
-    echo "Downloading R2 inputs to /comfyui/input/..."
-    mkdir -p /comfyui/input
-    /opt/venv/bin/python <<'PYEOF'
+# Custom nodes + models are baked in Docker image — NV-free mode (2026-04-15)
+# Previously had a dual-path "if NV exists then symlink else R2 download" block;
+# endpoints no longer run with Network Volume attached (networkVolumeId="").
+echo "INFO: NV-free mode — using baked models"
+echo "Downloading R2 inputs to /comfyui/input/..."
+mkdir -p /comfyui/input
+/opt/venv/bin/python <<'PYEOF'
 import os, sys
 sys.path.insert(0, '/')
 try:
@@ -60,9 +32,6 @@ except Exception as e:
     print(f"ERROR: {e}")
     traceback.print_exc()
 PYEOF
-fi
-
-mkdir -p /runpod-volume/jobs 2>/dev/null || true
 
 echo "Launching ComfyUI on port 8188..."
 cd /comfyui

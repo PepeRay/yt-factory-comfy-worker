@@ -34,16 +34,16 @@ COMFY_HOST = "127.0.0.1:8188"
 COMFY_API_AVAILABLE_INTERVAL_MS = int(os.environ.get("COMFY_API_AVAILABLE_INTERVAL_MS", 500))
 COMFY_API_AVAILABLE_MAX_RETRIES = int(os.environ.get("COMFY_API_AVAILABLE_MAX_RETRIES", 480))
 COMFY_EXECUTION_TIMEOUT = int(os.environ.get("COMFY_EXECUTION_TIMEOUT", 600))
-NETWORK_VOLUME_PATH = os.environ.get("RUNPOD_NETWORK_VOLUME_PATH", "/runpod-volume")
-if os.path.isdir(NETWORK_VOLUME_PATH):
-    PROJECTS_ROOT = os.path.join(NETWORK_VOLUME_PATH, "projects")
-else:
-    PROJECTS_ROOT = "/tmp/projects"
+# NV→R2 migration completed 2026-04-15. Workers run without Network Volume
+# attached; PROJECTS_ROOT is always ephemeral tmpfs. The previous conditional
+# `if os.path.isdir('/runpod-volume')` fell through to a false-positive because
+# the base image contains an empty `/runpod-volume/` dir, so PROJECTS_ROOT ended
+# up on the container rootfs (same bug pattern as handler_video.py lesson #44).
+PROJECTS_ROOT = "/tmp/projects"
 os.makedirs(PROJECTS_ROOT, exist_ok=True)
 
 _OUTPUT_DIR_CANDIDATES = [
     "/comfyui/output",
-    f"{NETWORK_VOLUME_PATH}/ComfyUI/output",
     "/comfyui/temp",
 ]
 
@@ -401,54 +401,10 @@ def handler(job):
     # Ensure voice references are downloaded from R2 (first job only)
     _ensure_r2_inputs()
 
-    # ── Upload-inputs: scan NV and upload input files to R2 ──
-    if job_type == "upload-inputs":
-        if not R2_ENABLED:
-            return {"error": "R2 is not enabled — cannot upload inputs"}
-
-        uploaded = []
-        input_dir = os.path.join(NETWORK_VOLUME_PATH, "ComfyUI", "input")
-
-        # 1) Upload all files from ComfyUI/input/
-        if os.path.isdir(input_dir):
-            for fname in os.listdir(input_dir):
-                fpath = os.path.join(input_dir, fname)
-                if os.path.isfile(fpath):
-                    r2_key = f"inputs/audio/{fname}"
-                    try:
-                        r2_helper.upload_file(fpath, r2_key)
-                        uploaded.append({
-                            "local_path": fpath,
-                            "r2_key": r2_key,
-                            "r2_url": r2_helper.presigned_url(r2_key),
-                        })
-                    except Exception as e:
-                        print(f"[WARN] upload-inputs: failed {fpath}: {e}")
-
-        # 2) Upload music/ dirs from each channel under projects/
-        if os.path.isdir(PROJECTS_ROOT):
-            for channel_name in os.listdir(PROJECTS_ROOT):
-                music_dir = os.path.join(PROJECTS_ROOT, channel_name, "music")
-                if os.path.isdir(music_dir):
-                    for fname in os.listdir(music_dir):
-                        fpath = os.path.join(music_dir, fname)
-                        if os.path.isfile(fpath):
-                            r2_key = f"{channel_name}/music/{fname}"
-                            try:
-                                r2_helper.upload_file(fpath, r2_key)
-                                uploaded.append({
-                                    "local_path": fpath,
-                                    "r2_key": r2_key,
-                                    "r2_url": r2_helper.presigned_url(r2_key),
-                                })
-                            except Exception as e:
-                                print(f"[WARN] upload-inputs: failed {fpath}: {e}")
-
-        return {
-            "status": "success",
-            "job_type": "upload-inputs",
-            "uploaded": uploaded,
-        }
+    # Note: the legacy `upload-inputs` job_type (NV→R2 one-shot migration)
+    # was removed 2026-04-15 after the migration completed. If any scheduled
+    # dispatch still references it, the router below will return a clean
+    # "Unsupported job_type" error rather than silently reading stale NV paths.
 
     if not channel:
         return {"error": "Missing required field: channel"}
