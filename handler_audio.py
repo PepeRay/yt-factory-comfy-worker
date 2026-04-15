@@ -240,6 +240,66 @@ def collect_and_move(prompt_id, dest_dir, prefix, index=None):
     return results
 
 
+# ── Audio helpers (duration probe + loudness normalization) ──
+
+def _probe_duration(filepath):
+    """Return audio duration in seconds via ffprobe. Returns 0.0 on failure."""
+    try:
+        result = subprocess.run(
+            ["ffprobe", "-v", "error", "-show_entries", "format=duration",
+             "-of", "default=noprint_wrappers=1:nokey=1", filepath],
+            capture_output=True, text=True, timeout=10
+        )
+        if result.returncode == 0 and result.stdout.strip():
+            return float(result.stdout.strip())
+    except (ValueError, subprocess.TimeoutExpired, FileNotFoundError):
+        pass
+    return 0.0
+
+
+def _apply_loudnorm(filepath, target_i=-16.0, target_tp=-1.5, target_lra=11.0):
+    """
+    Normalize audio loudness to EBU R128 target via ffmpeg loudnorm filter.
+    Homologates inter-chunk volume variance so concat output sounds consistent.
+
+    Single-pass linear mode (~0.3-0.5s per chunk overhead). Two-pass would be
+    more accurate but not worth the latency for narration content where the
+    source is already close to target (Qwen3/CosyVoice3 TTS output sits around
+    -18 to -14 LUFS naturally; single-pass linear nudges it to -16 cleanly).
+
+    YouTube target: -16 LUFS integrated, -1.5 dBTP true peak, LRA 11.
+    Industry standard for podcasts + YouTube narration (ATSC A/85 loose).
+
+    On failure, logs warning and leaves the original file untouched (fail-open).
+    """
+    tmp_path = filepath + ".norm.flac"
+    loudnorm_filter = f"loudnorm=I={target_i}:TP={target_tp}:LRA={target_lra}:linear=true"
+    cmd = [
+        "ffmpeg", "-y", "-i", filepath,
+        "-af", loudnorm_filter,
+        "-c:a", "flac",
+        tmp_path,
+    ]
+    try:
+        result = subprocess.run(cmd, capture_output=True, text=True, timeout=60)
+        if result.returncode == 0 and os.path.exists(tmp_path) and os.path.getsize(tmp_path) > 0:
+            os.replace(tmp_path, filepath)
+            return True
+        else:
+            print(f"[WARN] loudnorm failed for {os.path.basename(filepath)}: rc={result.returncode} stderr={result.stderr[-200:]}")
+    except subprocess.TimeoutExpired:
+        print(f"[WARN] loudnorm timeout for {os.path.basename(filepath)}")
+    except Exception as e:
+        print(f"[WARN] loudnorm exception for {os.path.basename(filepath)}: {e}")
+    # Cleanup temp on any failure
+    try:
+        if os.path.exists(tmp_path):
+            os.remove(tmp_path)
+    except OSError:
+        pass
+    return False
+
+
 # ── Compose (FFmpeg) — concat_audio only ────────────────────
 
 def _compose_concat_audio(src, dest, content_id, channel=None, platform=None):
@@ -274,6 +334,23 @@ def _compose_concat_audio(src, dest, content_id, channel=None, platform=None):
         raise RuntimeError(
             f"No audio chunks found in NV ({audio_dir}) or R2"
         )
+
+    # Loudness homologation (2026-04-15): normalize each chunk to EBU R128 target
+    # BEFORE concat so inter-chunk volume variance is flattened. Qwen3/CosyVoice3
+    # TTS output can drift ±2-3 LUFS between chunks depending on text intensity;
+    # human ear perceives this as "subtle volume jumps" in the final narration.
+    # loudnorm per-chunk targeting I=-16:TP=-1.5:LRA=11 homologates them cleanly.
+    # Cost: ~0.3-0.5s per chunk (~5-8s total for a 10-chunk video). Negligible.
+    # Fail-open: if loudnorm fails on any chunk, concat proceeds with the
+    # un-normalized original (better degraded audio than no audio).
+    norm_ok = 0
+    norm_fail = 0
+    for chunk_path in chunks:
+        if _apply_loudnorm(chunk_path):
+            norm_ok += 1
+        else:
+            norm_fail += 1
+    print(f"[INFO] Loudness homologation: {norm_ok}/{len(chunks)} chunks normalized ({norm_fail} failed/skipped)")
 
     concat_list = os.path.join(dest, "concat_list.txt")
     with open(concat_list, "w") as f:
@@ -479,8 +556,21 @@ def handler(job):
                     local_path = os.path.join(dest, f"{prefix}_{index_str}.flac")
                     r2_helper.download_file(existing_r2_key, local_path)
                     local_size = os.path.getsize(local_path) if os.path.exists(local_path) else 0
-                    if local_size >= 100_000:  # sanity: TTS chunks are normally 500KB-3MB
-                        print(f"[INFO] txt-voice chunk={index_str} REUSE: flac already in R2 ({local_size/1024/1024:.2f} MB), skipping TTS")
+                    # I4c size-proportional check (2026-04-15, lesson #37):
+                    # If n8n sends `word_count`, compute expected size from
+                    # empirical Qwen3 flac @ 24kHz mono ratio (~330 bytes/word)
+                    # and require actual >= 85% of expected. Catches chunks
+                    # truncated to ~30-70% by the Qwen3 sub-chunk seam bug
+                    # (lesson #34). Falls back to the old 100KB floor when
+                    # word_count is missing (backward compat with older pipelines).
+                    word_count = job_input.get("word_count")
+                    if word_count and word_count > 0:
+                        expected_bytes = int(word_count) * 330
+                        min_accept = int(expected_bytes * 0.85)
+                    else:
+                        min_accept = 100_000
+                    if local_size >= min_accept:
+                        print(f"[INFO] txt-voice chunk={index_str} REUSE: flac in R2 ({local_size/1024/1024:.2f} MB, min_accept={min_accept}, word_count={word_count}), skipping TTS")
                         return {
                             "status": "success",
                             "job_type": job_type,
@@ -498,7 +588,8 @@ def handler(job):
                             }],
                         }
                     else:
-                        print(f"[WARN] txt-voice chunk={index_str} flac in R2 but local download size={local_size} < 100KB, re-generating")
+                        ratio = local_size / max(min_accept, 1)
+                        print(f"[WARN] txt-voice chunk={index_str} REJECT REUSE: size={local_size} < min_accept={min_accept} (ratio={ratio:.2f}, word_count={word_count}), re-generating")
                         try:
                             os.remove(local_path)
                         except OSError:
@@ -534,6 +625,34 @@ def handler(job):
         ws.close()
 
     results = collect_and_move(prompt_id, dest, prefix, index=index)
+
+    # Duration QA (2026-04-15, lesson #34 Nivel 3 safety net):
+    # After TTS generation, verify each chunk's actual duration matches the
+    # expected duration derived from word_count. The Qwen3 sub-chunk seam bug
+    # (lesson #34) can produce chunks truncated to ~30-70% of expected length
+    # without any visible error — Whisper's language model priors later fill
+    # the gap with hallucinations, masking the bug until human ears catch it.
+    # This check detects truncation at source time and flags the result so
+    # downstream (n8n Validate SRT) can reject-and-retry instead of shipping
+    # broken audio. Threshold: actual >= 0.85 * expected (empirical ~0.35
+    # sec/word for Qwen3 at default speed — recalibrate if voice params change).
+    # Fail-open: missing word_count → no check (backward compat).
+    if job_type == "txt-voice" and results:
+        word_count = job_input.get("word_count")
+        if word_count and word_count > 0:
+            expected_dur = float(word_count) * 0.35
+            min_accept_dur = expected_dur * 0.85
+            for result in results:
+                filepath = result.get("path")
+                if filepath and os.path.exists(filepath):
+                    actual_dur = _probe_duration(filepath)
+                    result["duration_sec"] = round(actual_dur, 3)
+                    result["expected_duration_sec"] = round(expected_dur, 3)
+                    if actual_dur > 0 and actual_dur < min_accept_dur:
+                        ratio = actual_dur / expected_dur
+                        warn_msg = f"TRUNCATED? actual={actual_dur:.2f}s < min_accept={min_accept_dur:.2f}s (expected {expected_dur:.2f}s, ratio={ratio:.2f}, word_count={word_count})"
+                        print(f"[WARN] txt-voice chunk={result.get('filename','?')}: {warn_msg}")
+                        result["duration_warning"] = warn_msg
 
     # Upload to R2 (dual-write: NV + R2 during migration)
     if R2_ENABLED:
