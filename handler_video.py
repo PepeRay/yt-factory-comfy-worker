@@ -440,9 +440,17 @@ def _pad_segment_to_duration(seg_path, out_path, pad_duration, width, height, fp
 
 
 def _ensure_compose_inputs(channel, content_id, src, dest):
-    """Always download ALL compose inputs from R2 (NV-free: workers don't share filesystem).
+    """Always download ALL compose inputs from R2, OVERWRITING local cache.
     Without NV, each worker only has files it generated locally. The compose worker
-    must download all files from R2 to get a complete picture."""
+    must download all files from R2 to get a complete picture.
+
+    Fix 2026-04-18: previous version used `if not os.path.exists(local_path): download`
+    which skipped download for warm workers that had stale cache from prior jobs.
+    Manifested as: scene_007_infographic.mp4 hot-patched in R2 (new visuals) was
+    NOT re-downloaded by warm worker during compose -> compose used old MP4 with
+    hero-card invisible bug. Fix: always download, overwriting any local cache.
+    Cost: ~200MB of bandwidth per compose job (R2 egress is free within RunPod
+    infrastructure; trivial compared to guaranteeing fresh content)."""
     if not R2_ENABLED:
         return
     for subdir in ("images", "video", "audio", "srt"):
@@ -451,14 +459,21 @@ def _ensure_compose_inputs(channel, content_id, src, dest):
         try:
             keys = r2_helper.list_files(r2_prefix)
             if keys:
+                # Clear stale cache for this content (defense in depth — if a
+                # file was deleted in R2, we don't want stale local copy).
+                if os.path.exists(local_dir):
+                    for existing in os.listdir(local_dir):
+                        epath = os.path.join(local_dir, existing)
+                        if os.path.isfile(epath):
+                            try: os.remove(epath)
+                            except OSError: pass
                 os.makedirs(local_dir, exist_ok=True)
                 downloaded = 0
                 for key in keys:
                     local_path = os.path.join(local_dir, os.path.basename(key))
-                    if not os.path.exists(local_path):
-                        r2_helper.download_file(key, local_path)
-                        downloaded += 1
-                print(f"[INFO] {subdir}/: {len(keys)} files in R2, {downloaded} downloaded")
+                    r2_helper.download_file(key, local_path)
+                    downloaded += 1
+                print(f"[INFO] {subdir}/: {len(keys)} files in R2, {downloaded} downloaded (fresh, cache cleared)")
         except Exception as e:
             print(f"[WARN] R2 download failed for {subdir}: {e}")
 
