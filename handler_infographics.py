@@ -166,25 +166,37 @@ def _handler_impl(work_dir, html_url, duration_sec, scene_id, video_id, channel)
             f"Renderer stdout:\n{render_result.stdout[-1000:]}"
         )
 
-    if actual_frame_count < target_frames * 0.5:
+    if actual_frame_count < 30:
         print(
-            f"    WARN: captured {actual_frame_count} < 50% of target "
-            f"{target_frames} — output will be shorter than requested"
+            f"    WARN: captured only {actual_frame_count} frames in {duration_sec}s "
+            f"— output may look choppy"
         )
 
     # ── 3. Encode frames → MP4 with ffmpeg ──
+    # Chromium screencast on CPU emits frames at ~5-15fps depending on visual
+    # complexity, NOT the requested 30fps. To produce an MP4 with the correct
+    # duration matching the scene narration, we:
+    #   - Compute actual_fps = captured_frames / wall_duration_sec
+    #   - Use that as ffmpeg INPUT framerate (so each PNG maps to correct timestamp)
+    #   - Force OUTPUT framerate to 30fps (ffmpeg duplicates frames for smoothness)
+    # Result: MP4 duration == duration_sec (correct), 30fps standard playback.
     mp4_path = os.path.join(work_dir, f"scene_{scene_id}_infographic.mp4")
-    print(f"[3/4] Encoding {actual_frame_count} frames -> MP4 (libx264 CRF 18)")
+    actual_fps = actual_frame_count / duration_sec
+    print(
+        f"[3/4] Encoding {actual_frame_count} frames @ {actual_fps:.2f} real fps "
+        f"-> MP4 (target {duration_sec}s, output {fps}fps, libx264 CRF 18)"
+    )
 
     encode_cmd = [
         "ffmpeg", "-y",
         "-loglevel", "warning",
-        "-framerate", str(fps),
+        "-framerate", f"{actual_fps:.3f}",
         "-i", os.path.join(frames_dir, "frame_%05d.png"),
         "-c:v", "libx264",
         "-preset", "medium",
         "-crf", "18",
         "-pix_fmt", "yuv420p",
+        "-r", str(fps),
         "-movflags", "+faststart",
         mp4_path,
     ]
@@ -221,8 +233,10 @@ def _handler_impl(work_dir, html_url, duration_sec, scene_id, video_id, channel)
     return {
         "mp4_url": mp4_url,
         "r2_key": r2_key,
-        "duration_actual_sec": round(actual_frame_count / fps, 3),
+        "duration_actual_sec": round(duration_sec, 3),  # MP4 duration matches request
         "frames_captured": actual_frame_count,
+        "real_capture_fps": round(actual_fps, 2),
+        "output_fps": fps,
         "file_size_bytes": file_size,
         "elapsed_sec": round(elapsed, 2),
     }
