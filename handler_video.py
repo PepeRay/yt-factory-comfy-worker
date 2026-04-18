@@ -756,6 +756,111 @@ def _render_match_cut(img_a, img_b, duration, seg_path, w, h, fps):
     return seg_path
 
 
+def _render_multi_crossfade(
+    image_paths,
+    duration_sec,
+    output_path,
+    effect="auto",
+    w=1920, h=1080, fps=30,
+    segments_dir=None,
+    sid=0,
+    xf_dur=0.6,
+):
+    """Multi-image crossfade with per-segment ken_burns. N=3 or N=4 images.
+
+    Each image holds T/N seconds of clean screen-time + xf_dur crossfade overlap
+    with the next. Per-segment ken_burns gives continuous motion within each beat.
+
+    Two-phase strategy:
+      Phase 1: render N normalized seg files (1920x1080, fps, NVENC) with
+               per-segment ken_burns. Segment i (i < N-1) is rendered for
+               T/N + xf_dur seconds; segment N-1 is rendered for T/N seconds.
+      Phase 2: chain with ffmpeg xfade filter iteratively. Each iteration
+               produces an intermediate mp4. After N-1 iterations the final
+               merged mp4 is the result.
+
+    Particles overlay (lesson #31) is applied by the caller on the OUTPUT,
+    NOT here. Cleanup (lessons #44/#47) is in try/finally.
+    """
+    n = len(image_paths)
+    if n < 2:
+        raise RuntimeError(f"multi_crossfade requires N>=2, got {n}")
+    if n > 4:
+        print(f"[multi_xf sid={sid}] N={n}, capping at first 4 images")
+        image_paths = image_paths[:4]
+        n = 4
+
+    xf_dur = max(0.3, min(1.0, float(xf_dur)))
+    base_dur = duration_sec / n
+    if base_dur < xf_dur * 1.5:
+        xf_dur = max(0.2, base_dur * 0.4)
+        print(f"[multi_xf sid={sid}] base_dur={base_dur:.2f}s too short, shrinking xf_dur to {xf_dur:.2f}s")
+
+    if effect == "auto":
+        rotation_3 = ["zoom_in", "pan_left", "zoom_out"]
+        rotation_4 = ["zoom_in", "pan_left", "pan_right", "zoom_out"]
+        per_seg_effects = rotation_3 if n == 3 else rotation_4
+    else:
+        per_seg_effects = [effect] * n
+
+    if segments_dir is None:
+        segments_dir = os.path.dirname(output_path)
+    workdir = os.path.join(segments_dir, f"_multixf_{sid:04d}")
+    os.makedirs(workdir, exist_ok=True)
+
+    seg_files = []
+    try:
+        for i, img in enumerate(image_paths):
+            seg_duration = base_dur + (xf_dur if i < n - 1 else 0)
+            seg_out = os.path.join(workdir, f"part_{i:02d}.mp4")
+            seg_effect = per_seg_effects[i]
+            print(f"[multi_xf sid={sid}] part {i+1}/{n} effect={seg_effect} d={seg_duration:.3f}s img={os.path.basename(img)}")
+            try:
+                _render_image_effect(seg_effect, img, None, seg_duration, seg_out, w, h, fps)
+            except Exception as e:
+                print(f"[multi_xf sid={sid}] part {i+1} effect '{seg_effect}' failed ({e}), static fallback")
+                _render_image_effect("static", img, None, seg_duration, seg_out, w, h, fps)
+            seg_files.append(seg_out)
+
+        merged = seg_files[0]
+        cum_dur = base_dur + xf_dur
+
+        for i in range(1, n):
+            next_part = seg_files[i]
+            iter_out = os.path.join(workdir, f"merged_{i:02d}.mp4")
+            offset = cum_dur - xf_dur
+            cmd = [
+                "ffmpeg", "-y",
+                "-i", merged,
+                "-i", next_part,
+                "-filter_complex",
+                f"[0:v][1:v]xfade=transition=fade:duration={xf_dur:.4f}:offset={offset:.4f},format=yuv420p",
+                "-r", str(fps),
+                *NVENC_HQ_ARGS, "-an", iter_out,
+            ]
+            res = _run_ffmpeg_with_nvenc_fallback(cmd, timeout=180, label=f"multi_xf sid={sid} iter {i}")
+            if res.returncode != 0:
+                raise RuntimeError(f"multi_xf sid={sid} xfade iter {i}: {res.stderr[-300:]}")
+            merged = iter_out
+            cum_dur = cum_dur + base_dur + (xf_dur if i < n - 1 else 0)
+
+        shutil.move(merged, output_path)
+
+        try:
+            real_dur = _get_video_duration(output_path)
+            if abs(real_dur - duration_sec) > 0.3:
+                print(f"WARN: multi_xf sid={sid} duration drift: target={duration_sec:.3f} got={real_dur:.3f}")
+            else:
+                print(f"[multi_xf sid={sid}] ok: {real_dur:.3f}s (target {duration_sec:.3f}s)")
+        except Exception as e:
+            print(f"[multi_xf sid={sid}] duration probe failed: {e}")
+
+        return output_path
+
+    finally:
+        shutil.rmtree(workdir, ignore_errors=True)
+
+
 def _render_particles(img_path, particles_path, duration, seg_path, w, h, fps):
     """Blend looping particles.mov on top of a ken_burns_slow base using screen
     mode. Source is Mixkit MP4 on pure black background (no alpha) — screen
@@ -1180,6 +1285,109 @@ def _compose_scene_manifest_impl(src, dest, content_id, config, channel, platfor
                             os.replace(crossfade_out, seg_path)
                     # Generate silence for non-video scenes
                     sil_cmd = ["ffmpeg", "-y", "-f", "lavfi", "-i", f"anullsrc=r=44100:cl=stereo", "-t", str(duration), "-c:a", "aac", amb_path]
+                    subprocess.run(sil_cmd, capture_output=True, text=True, timeout=30)
+                    segment_paths.append({"path": seg_path, "scene": scene})
+                    continue
+
+            if render_type == "multi_crossfade":
+                # 2026-04-17: N=3 or N=4 images chained with crossfades + per-segment
+                # ken_burns. Promoted from `crossfade` by Validator Fase 4 when
+                # duration_sec > 15s (3 imgs for 15-20s, 4 imgs for >20s).
+                # Each image holds ~T/N seconds with continuous ken_burns motion.
+                images_needed = int(scene.get("images_needed") or 3)
+                if images_needed not in (3, 4):
+                    print(f"WARN: scene {sid} multi_crossfade invalid images_needed={images_needed}, clamping to 3")
+                    images_needed = 3
+
+                slot_names = (
+                    ["initial", "mid_1", "final"] if images_needed == 3
+                    else ["initial", "mid_1", "mid_2", "final"]
+                )
+                image_paths = []
+                for slot in slot_names:
+                    p = _find_image(img_dir, sid, slot)
+                    if p:
+                        image_paths.append(p)
+                    else:
+                        print(f"WARN: scene {sid} multi_crossfade missing slot '{slot}'")
+
+                if len(image_paths) == 0:
+                    print(f"WARN: scene {sid} multi_crossfade no images, skipping")
+                    skipped += 1
+                    continue
+                if len(image_paths) == 1:
+                    print(f"WARN: scene {sid} multi_crossfade only 1 image, falling back to ken_burns")
+                    render_type = "ken_burns"  # fall through to next if-block
+                elif len(image_paths) == 2:
+                    print(f"WARN: scene {sid} multi_crossfade only 2 images, falling back to crossfade")
+                    img_a, img_b = image_paths[0], image_paths[1]
+                    wants_particles = bool(scene.get("_particles_overlay"))
+                    out = seg_path.replace(".mp4", "_base.mp4") if wants_particles else seg_path
+                    cmd = [
+                        "ffmpeg", "-y",
+                        "-loop", "1", "-i", img_a,
+                        "-loop", "1", "-i", img_b,
+                        "-filter_complex",
+                        f"[0:v]scale={WIDTH}:{HEIGHT},setsar=1,format=yuv420p[a];"
+                        f"[1:v]scale={WIDTH}:{HEIGHT},setsar=1,format=yuv420p[b];"
+                        f"[a][b]blend=all_expr='A*(1-T/{duration})+B*(T/{duration})':shortest=1",
+                        "-t", str(duration), "-r", str(FPS),
+                        *NVENC_HQ_ARGS, out,
+                    ]
+                    res = _run_ffmpeg_with_nvenc_fallback(cmd, timeout=120, label=f"multi_xf->xf sid={sid}")
+                    if res.returncode != 0:
+                        raise RuntimeError(f"segment {sid} multi_crossfade->crossfade: {res.stderr[-200:]}")
+                    if wants_particles:
+                        try:
+                            _apply_particles_overlay(out, seg_path, float(duration), WIDTH, HEIGHT, FPS)
+                        except Exception as e:
+                            print(f"WARN: scene {sid} particles failed ({e}), using base")
+                            os.replace(out, seg_path)
+                    sil_cmd = ["ffmpeg", "-y", "-f", "lavfi", "-i", "anullsrc=r=44100:cl=stereo",
+                               "-t", str(duration), "-c:a", "aac", amb_path]
+                    subprocess.run(sil_cmd, capture_output=True, text=True, timeout=30)
+                    segment_paths.append({"path": seg_path, "scene": scene})
+                    continue
+                else:
+                    # Happy path: N=3 or N=4 images present
+                    wants_particles = bool(scene.get("_particles_overlay"))
+                    out_path = seg_path.replace(".mp4", "_base.mp4") if wants_particles else seg_path
+                    try:
+                        _render_multi_crossfade(
+                            image_paths=image_paths,
+                            duration_sec=float(duration),
+                            output_path=out_path,
+                            effect=scene.get("effect") or "auto",
+                            w=WIDTH, h=HEIGHT, fps=FPS,
+                            segments_dir=segments_dir, sid=sid,
+                        )
+                    except Exception as e:
+                        print(f"WARN: scene {sid} multi_crossfade failed ({e}), falling back to crossfade(2img)")
+                        img_a, img_b = image_paths[0], image_paths[-1]
+                        cmd = [
+                            "ffmpeg", "-y",
+                            "-loop", "1", "-i", img_a,
+                            "-loop", "1", "-i", img_b,
+                            "-filter_complex",
+                            f"[0:v]scale={WIDTH}:{HEIGHT},setsar=1,format=yuv420p[a];"
+                            f"[1:v]scale={WIDTH}:{HEIGHT},setsar=1,format=yuv420p[b];"
+                            f"[a][b]blend=all_expr='A*(1-T/{duration})+B*(T/{duration})':shortest=1",
+                            "-t", str(duration), "-r", str(FPS),
+                            *NVENC_HQ_ARGS, out_path,
+                        ]
+                        res = _run_ffmpeg_with_nvenc_fallback(cmd, timeout=120, label=f"multi_xf-fallback sid={sid}")
+                        if res.returncode != 0:
+                            raise RuntimeError(f"segment {sid} multi_crossfade fallback: {res.stderr[-200:]}")
+
+                    if wants_particles:
+                        try:
+                            _apply_particles_overlay(out_path, seg_path, float(duration), WIDTH, HEIGHT, FPS)
+                        except Exception as e:
+                            print(f"WARN: scene {sid} multi_crossfade particles failed ({e}), using base")
+                            os.replace(out_path, seg_path)
+
+                    sil_cmd = ["ffmpeg", "-y", "-f", "lavfi", "-i", "anullsrc=r=44100:cl=stereo",
+                               "-t", str(duration), "-c:a", "aac", amb_path]
                     subprocess.run(sil_cmd, capture_output=True, text=True, timeout=30)
                     segment_paths.append({"path": seg_path, "scene": scene})
                     continue
