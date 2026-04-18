@@ -46,10 +46,16 @@ import r2_helper
 
 PROJECTS_ROOT = "/tmp/projects"
 DEFAULT_OUTPUT_FPS = 30
-CAPTURE_FPS = 15           # Chromium screenshot loop rate; encoding upsamples to OUTPUT_FPS
-ANIMATION_CAPTURE_SEC = 3.5  # active capture window — Dominion animations finish ~2.6s, +0.9s buffer
-RENDER_TIMEOUT_SEC = 240   # 4 min hard cap for Puppeteer render
-ENCODE_TIMEOUT_SEC = 120   # 2 min hard cap for ffmpeg encode
+CAPTURE_FPS = 15            # Chromium screenshot loop rate; encoding upsamples to OUTPUT_FPS
+# CSS animation playback rate via CDP. 1.0 = real-time. <1.0 = slower.
+# Dominion CSS anims finish in ~2.6s real-time which felt too fast on YouTube.
+# 0.6 stretches to ~4.3s, in the 2-4s range that reads well on screen.
+ANIMATION_PLAYBACK_RATE = 0.6
+# Active capture window — must cover full animation at the chosen playback rate.
+# Dominion anims 2.6s nominal × (1/0.6) = 4.3s + 0.7s buffer = 5.0s
+ANIMATION_CAPTURE_SEC = 5.0
+RENDER_TIMEOUT_SEC = 240    # 4 min hard cap for Puppeteer render
+ENCODE_TIMEOUT_SEC = 120    # 2 min hard cap for ffmpeg encode
 
 
 def handler(event):
@@ -136,7 +142,8 @@ def _handler_impl(work_dir, html_url, duration_sec, scene_id, video_id, channel)
     print(
         f"[2/4] Rendering {target_capture_frames} frames @ {CAPTURE_FPS}fps "
         f"capture rate over {animation_sec}s active animation "
-        f"(+ {hold_final_sec:.1f}s static hold = {duration_sec}s total MP4)"
+        f"(playbackRate={ANIMATION_PLAYBACK_RATE}x, +{hold_final_sec:.1f}s static hold "
+        f"= {duration_sec}s total MP4)"
     )
 
     render_cmd = [
@@ -145,6 +152,7 @@ def _handler_impl(work_dir, html_url, duration_sec, scene_id, video_id, channel)
         frames_dir,
         str(animation_sec),
         str(CAPTURE_FPS),
+        str(ANIMATION_PLAYBACK_RATE),
     ]
 
     render_result = subprocess.run(
@@ -257,6 +265,7 @@ def _handler_impl(work_dir, html_url, duration_sec, scene_id, video_id, channel)
         "duration_actual_sec": round(duration_sec, 3),  # MP4 duration matches request
         "animation_sec": round(animation_sec, 3),
         "hold_final_sec": round(hold_final_sec, 3),
+        "playback_rate": ANIMATION_PLAYBACK_RATE,
         "frames_captured": actual_frame_count,
         "real_capture_fps": round(actual_capture_fps, 2),
         "output_fps": output_fps,

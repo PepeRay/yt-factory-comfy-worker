@@ -40,12 +40,13 @@ const CHROMIUM_PATH = process.env.CHROMIUM_PATH || '/usr/bin/chromium';
 const VIEWPORT = { width: 1920, height: 1080 };
 const NAV_TIMEOUT_MS = 30000;
 
-async function render(htmlPath, framesDir, animationSec, targetFps) {
-  console.log(`[render] starting (v2 — fixed-rate screenshot loop)`);
+async function render(htmlPath, framesDir, animationSec, targetFps, playbackRate) {
+  console.log(`[render] starting (v3 — fixed-rate screenshot + CDP playback rate)`);
   console.log(`  html:          ${htmlPath}`);
   console.log(`  frames:        ${framesDir}`);
   console.log(`  capture:       ${animationSec}s @ ${targetFps}fps target`);
   console.log(`  target frames: ${Math.round(animationSec * targetFps)}`);
+  console.log(`  playbackRate:  ${playbackRate}x (1.0=real-time, <1=slower)`);
   console.log(`  chrome:        ${CHROMIUM_PATH}`);
 
   const browser = await puppeteer.launch({
@@ -82,8 +83,24 @@ async function render(htmlPath, framesDir, animationSec, targetFps) {
     });
 
     await page.evaluateHandle(() => document.fonts.ready);
-    console.log(`  fonts ready, starting capture loop`);
+    console.log(`  fonts ready`);
 
+    // Apply CSS animation playback rate via CDP. This slows down (or speeds up)
+    // ALL animations in the page without modifying the HTML/CSS.
+    // Use case: Dominion CSS animations finish in ~2.6s real-time, which feels
+    // too fast on YouTube playback. Setting rate=0.6 stretches them to ~4.3s.
+    if (playbackRate !== 1.0) {
+      const client = await page.createCDPSession();
+      try {
+        await client.send('Animation.enable');
+        await client.send('Animation.setPlaybackRate', { playbackRate });
+        console.log(`  CDP Animation.setPlaybackRate(${playbackRate}) applied`);
+      } catch (e) {
+        console.warn(`  WARN: failed to set playbackRate: ${e.message}. Continuing at 1.0x.`);
+      }
+    }
+
+    console.log(`  starting capture loop`);
     const intervalMs = 1000 / targetFps;
     const totalFrames = Math.round(animationSec * targetFps);
 
@@ -131,14 +148,20 @@ async function render(htmlPath, framesDir, animationSec, targetFps) {
   }
 }
 
-const [, , htmlPath, framesDir, animationSec, targetFps] = process.argv;
+const [, , htmlPath, framesDir, animationSec, targetFps, playbackRate] = process.argv;
 
 if (!htmlPath || !framesDir || !animationSec || !targetFps) {
-  console.error('Usage: node render.js <html_path> <frames_dir> <animation_sec> <target_fps>');
+  console.error('Usage: node render.js <html_path> <frames_dir> <animation_sec> <target_fps> [playback_rate=1.0]');
   process.exit(2);
 }
 
-render(htmlPath, framesDir, parseFloat(animationSec), parseInt(targetFps, 10))
+render(
+  htmlPath,
+  framesDir,
+  parseFloat(animationSec),
+  parseInt(targetFps, 10),
+  playbackRate ? parseFloat(playbackRate) : 1.0
+)
   .then(() => process.exit(0))
   .catch(err => {
     console.error('[render] error:', err && err.stack || err);
