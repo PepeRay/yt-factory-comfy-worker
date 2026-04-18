@@ -1,10 +1,10 @@
-# === YouTube Factory — Puppeteer Endpoint (CPU slim) ===
+# === YouTube Factory — Infographics Endpoint (CPU slim, Puppeteer-powered) ===
 # Renders HTML infographics (CSS @keyframes animations) to MP4 via headless
 # Chromium controlled from Node.js, then encodes frames with ffmpeg and
 # uploads the result to R2. Pure CPU workload — no GPU needed (CSS paint
 # is CPU-bound, no WebGL involved).
 #
-# Used by the CPU endpoint `yt-factory-puppeteer` (id pending — see
+# Used by the CPU endpoint `yt-factory-infographics` (id pending — see
 # Arquitectura Tecnica once provisioned). Triggered by the n8n Infographic
 # Pipeline workflow when Sheet Aut transitions `infographic_status=processing`.
 #
@@ -16,7 +16,7 @@
 #   - Liberation/Noto/DejaVu fonts + Color Emoji for proper glyph coverage
 #     (Google Fonts CDN fallback + emoji rendering since infographic icons
 #     are emojis per visual-maestro convention)
-#   - handler_puppeteer.py + render.js + r2_helper.py
+#   - handler_infographics.py + render.js + r2_helper.py
 #
 # Does NOT contain: ComfyUI, GPU drivers, video models, PyTorch.
 #
@@ -30,15 +30,15 @@
 #     (lecciones #40, #44, #45)
 #
 # Rebuild triggers (via .github/workflows/build-split.yml):
-#   - Dockerfile.puppeteer
-#   - handler_puppeteer.py
+#   - Dockerfile.infographics
+#   - handler_infographics.py
 #   - render.js
 #   - r2_helper.py
 #
 # Deployment note: template + endpoint must be created MANUALLY via RunPod UI
 # the first time (lección #39 — REST CPU endpoint creation silently falls
 # back to GPU). After first manual setup, the imageName can be auto-PATCHed
-# from CI by adding an `update-runpod-puppeteer` job analogous to
+# from CI by adding an `update-runpod-infographics` job analogous to
 # `update-runpod-{audio,video}` jobs.
 
 FROM node:20-bookworm-slim
@@ -84,7 +84,7 @@ RUN npm init -y && \
     npm cache clean --force
 
 # ── Handler + renderer + R2 helper ──
-COPY handler_puppeteer.py /app/handler.py
+COPY handler_infographics.py /app/handler.py
 COPY render.js /app/render.js
 COPY r2_helper.py /app/r2_helper.py
 
@@ -93,5 +93,5 @@ RUN chromium --version || (echo "Chromium failed to launch" && exit 1)
 
 CMD ["python3", "/app/handler.py"]
 
-LABEL description="YT Factory Puppeteer — CPU image for HTML->MP4 rendering of animated infographics"
+LABEL description="YT Factory Infographics — CPU image (Puppeteer-powered) for HTML->MP4 rendering of animated infographics"
 LABEL version="v1"

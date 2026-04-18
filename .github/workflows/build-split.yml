@@ -6,7 +6,7 @@ on:
   workflow_dispatch:
     inputs:
       target:
-        description: 'Which image to build (audio, images, video, compose, puppeteer, all)'
+        description: 'Which image to build (audio, images, video, compose, infographics, all)'
         required: false
         default: 'all'
         type: choice
@@ -16,7 +16,7 @@ on:
           - images
           - video
           - compose
-          - puppeteer
+          - infographics
 
 env:
   REGISTRY: ghcr.io
@@ -31,7 +31,7 @@ jobs:
       images: ${{ steps.filter.outputs.images }}
       video: ${{ steps.filter.outputs.video }}
       compose: ${{ steps.filter.outputs.compose }}
-      puppeteer: ${{ steps.filter.outputs.puppeteer }}
+      infographics: ${{ steps.filter.outputs.infographics }}
       shared: ${{ steps.filter.outputs.shared }}
     steps:
       - uses: actions/checkout@v4
@@ -62,9 +62,9 @@ jobs:
               - 'r2_helper.py'
               - 'download_r2_inputs.py'
               - 'assets/**'
-            puppeteer:
-              - 'Dockerfile.puppeteer'
-              - 'handler_puppeteer.py'
+            infographics:
+              - 'Dockerfile.infographics'
+              - 'handler_infographics.py'
               - 'render.js'
               - 'r2_helper.py'
             shared:
@@ -378,23 +378,23 @@ jobs:
         run: |
           echo "image_tag=${{ env.IMAGE_PREFIX }}-compose:${{ github.sha }}" >> "$GITHUB_OUTPUT"
 
-  build-puppeteer:
+  build-infographics:
     # Puppeteer slim image — CPU-only (Chromium + Node + Python + ffmpeg).
     # Renders HTML infographics with CSS @keyframes animations to MP4.
-    # Used by the CPU endpoint `yt-factory-puppeteer` (id pending until first
-    # manual setup via RunPod UI — see Dockerfile.puppeteer header).
+    # Used by the CPU endpoint `yt-factory-infographics` (id pending until first
+    # manual setup via RunPod UI — see Dockerfile.infographics header).
     #
-    # Image: ghcr.io/peperay/yt-factory-puppeteer:<sha>
+    # Image: ghcr.io/peperay/yt-factory-infographics:<sha>
     # Target: ~600-800 MB. Cold start: ~30-45s first pull.
     # Template NOT auto-PATCHed — manual validation required on first deploy.
-    # Once validated, add `update-runpod-puppeteer` job analogous to
+    # Once validated, add `update-runpod-infographics` job analogous to
     # `update-runpod-{audio,video}`.
     needs: changes
     if: >-
       github.event_name == 'workflow_dispatch' &&
-      (github.event.inputs.target == 'all' || github.event.inputs.target == 'puppeteer') ||
+      (github.event.inputs.target == 'all' || github.event.inputs.target == 'infographics') ||
       github.event_name == 'push' &&
-      needs.changes.outputs.puppeteer == 'true'
+      needs.changes.outputs.infographics == 'true'
     runs-on: ubuntu-latest
     permissions:
       contents: read
@@ -415,15 +415,15 @@ jobs:
       - uses: docker/build-push-action@v6
         with:
           context: .
-          file: Dockerfile.puppeteer
+          file: Dockerfile.infographics
           push: true
           tags: |
-            ${{ env.IMAGE_PREFIX }}-puppeteer:latest
-            ${{ env.IMAGE_PREFIX }}-puppeteer:${{ github.sha }}
-          cache-from: type=gha,scope=puppeteer
-          cache-to: type=gha,mode=max,scope=puppeteer
+            ${{ env.IMAGE_PREFIX }}-infographics:latest
+            ${{ env.IMAGE_PREFIX }}-infographics:${{ github.sha }}
+          cache-from: type=gha,scope=infographics
+          cache-to: type=gha,mode=max,scope=infographics
 
       - name: Expose image tag for downstream jobs
         id: meta
         run: |
-          echo "image_tag=${{ env.IMAGE_PREFIX }}-puppeteer:${{ github.sha }}" >> "$GITHUB_OUTPUT"
+          echo "image_tag=${{ env.IMAGE_PREFIX }}-infographics:${{ github.sha }}" >> "$GITHUB_OUTPUT"
