@@ -76,36 +76,49 @@ async function render(htmlPath, framesDir, animationSec, targetFps, playbackRate
     });
 
     // Apply CSS animation slowdown via DOM mutation BEFORE navigation.
-    // History: v3 used BOTH CDP Animation.setPlaybackRate + evaluateOnNewDocument
-    // DOM injection as "belt-and-suspenders". This caused DOUBLE slowdown when
-    // both worked (observed 2026-04-18 with Dominion scene_007: .hero-card
-    // element disappeared during static hold because double slowdown broke
-    // animation-fill-mode: forwards persistence). Fix: use ONLY the DOM
-    // injection approach. It is deterministic across Chromium versions and
-    // works for CSS @keyframes (which CDP setPlaybackRate handles
-    // inconsistently for some versions). Pre-navigation via
-    // evaluateOnNewDocument ensures it runs before any paint.
+    // Two-layer strategy:
+    //   1. CDP Animation.setPlaybackRate — fast path, handled by Chromium
+    //      at the animation timeline level (preserves fill-mode semantics)
+    //   2. DOM injection — fallback that multiplies animation-duration and
+    //      animation-delay for elements where CDP did not take effect.
+    //
+    // We include BOTH because Chromium versions vary in how well
+    // setPlaybackRate applies to CSS @keyframes (vs Web Animations API).
+    // IMPORTANT: we do NOT force animation-fill-mode=both blindly anymore.
+    // That masked a real HTML template bug (scene_007 Dominion .hero-card
+    // had its `.anim-in` fadeSlideIn animation CLOBBERED by an element-
+    // specific `animation: heroPulse` declaration, leaving opacity:0 forever).
+    // The template bug is fixed at the visual-maestro generator level; see
+    // `visual-maestro/references/infographics.md` "Multi-animation CSS rule"
+    // and lesson #59 in runpod-infrastructure.md.
     if (playbackRate !== 1.0) {
+      const client = await page.createCDPSession();
+      try {
+        await client.send('Animation.enable');
+        await client.send('Animation.setPlaybackRate', { playbackRate });
+        console.log(`  CDP Animation.setPlaybackRate(${playbackRate}) set BEFORE navigation`);
+      } catch (e) {
+        console.warn(`  WARN: CDP setPlaybackRate failed: ${e.message}`);
+      }
+
+      // DOM injection as safety net. For double-slowdown safety we check
+      // if element has already been touched (data-slowed marker) to avoid
+      // compounding the factor if this script somehow runs twice.
       const slowFactor = 1 / playbackRate;
       await page.evaluateOnNewDocument((factor) => {
         const apply = () => {
           document.querySelectorAll('*').forEach(el => {
+            if (el.dataset.slowed) return;  // idempotent
             const cs = window.getComputedStyle(el);
             const dur = parseFloat(cs.animationDuration);
             const del = parseFloat(cs.animationDelay);
             if (dur && dur > 0) el.style.animationDuration = `${(dur * factor).toFixed(3)}s`;
             if (del && del > 0) el.style.animationDelay = `${(del * factor).toFixed(3)}s`;
-            // Same for transitions (rare in infographics but safe)
             const tDur = parseFloat(cs.transitionDuration);
             const tDel = parseFloat(cs.transitionDelay);
             if (tDur && tDur > 0) el.style.transitionDuration = `${(tDur * factor).toFixed(3)}s`;
             if (tDel && tDel > 0) el.style.transitionDelay = `${(tDel * factor).toFixed(3)}s`;
-            // CRITICAL (lesson from scene_007 bug): force fill-mode=both on
-            // animated elements so they persist at 'to' state after finishing.
-            // Without this, playback rate modification can cause Chromium to
-            // lose 'forwards' semantics and the element snaps back to 'from'
-            // state (opacity:0 etc), making it invisible during the static hold.
-            if (dur && dur > 0) el.style.animationFillMode = 'both';
+            el.dataset.slowed = '1';
           });
         };
         if (document.readyState === 'loading') {
@@ -114,7 +127,7 @@ async function render(htmlPath, framesDir, animationSec, targetFps, playbackRate
           apply();
         }
       }, slowFactor);
-      console.log(`  DOM slowdown injected: factor=${slowFactor}x (single layer — no CDP to avoid double slowdown, + force fill-mode=both)`);
+      console.log(`  DOM slowdown injected: factor=${slowFactor}x (idempotent, dataset.slowed marker)`);
     }
 
     const fileUrl = `file://${path.resolve(htmlPath)}`;
