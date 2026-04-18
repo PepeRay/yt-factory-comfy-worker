@@ -75,6 +75,55 @@ async function render(htmlPath, framesDir, animationSec, targetFps, playbackRate
       deviceScaleFactor: 1,
     });
 
+    // Apply CSS animation playback rate via CDP BEFORE navigation. CSS
+    // animations start as soon as the document renders — if we set the rate
+    // AFTER goto, they have already been running at 1.0x for ~1-2s and we
+    // only catch the tail. Pre-navigation setup ensures animations run at the
+    // configured rate from frame 0.
+    // Also inject an init script as a redundant safety net: it slows down
+    // animations via direct style.animationDuration mutation in case CDP
+    // setPlaybackRate misses some animations (it can be unreliable for
+    // CSS @keyframes vs Web Animations API in some Chromium versions).
+    if (playbackRate !== 1.0) {
+      const client = await page.createCDPSession();
+      try {
+        await client.send('Animation.enable');
+        await client.send('Animation.setPlaybackRate', { playbackRate });
+        console.log(`  CDP Animation.setPlaybackRate(${playbackRate}) set BEFORE navigation`);
+      } catch (e) {
+        console.warn(`  WARN: CDP setPlaybackRate failed: ${e.message}`);
+      }
+
+      // Belt-and-suspenders: inject a script that runs on every new document,
+      // walking the DOM and dividing animation-duration / animation-delay by
+      // playbackRate. Equivalent to multiplying their wall-clock duration by
+      // (1/playbackRate), which is exactly what slowing down means.
+      const slowFactor = 1 / playbackRate;
+      await page.evaluateOnNewDocument((factor) => {
+        const apply = () => {
+          document.querySelectorAll('*').forEach(el => {
+            const cs = window.getComputedStyle(el);
+            const dur = parseFloat(cs.animationDuration);
+            const del = parseFloat(cs.animationDelay);
+            if (dur && dur > 0) el.style.animationDuration = `${(dur * factor).toFixed(3)}s`;
+            if (del && del > 0) el.style.animationDelay = `${(del * factor).toFixed(3)}s`;
+            // Same for transitions (rare in infographics but safe)
+            const tDur = parseFloat(cs.transitionDuration);
+            const tDel = parseFloat(cs.transitionDelay);
+            if (tDur && tDur > 0) el.style.transitionDuration = `${(tDur * factor).toFixed(3)}s`;
+            if (tDel && tDel > 0) el.style.transitionDelay = `${(tDel * factor).toFixed(3)}s`;
+          });
+        };
+        // Run as early as possible, then again on DOMContentLoaded for safety
+        if (document.readyState === 'loading') {
+          document.addEventListener('DOMContentLoaded', apply, { once: true });
+        } else {
+          apply();
+        }
+      }, slowFactor);
+      console.log(`  Inject script: slowFactor=${slowFactor}x (anim/transition duration *= ${slowFactor})`);
+    }
+
     const fileUrl = `file://${path.resolve(htmlPath)}`;
     console.log(`  loading:  ${fileUrl}`);
     await page.goto(fileUrl, {
@@ -84,21 +133,6 @@ async function render(htmlPath, framesDir, animationSec, targetFps, playbackRate
 
     await page.evaluateHandle(() => document.fonts.ready);
     console.log(`  fonts ready`);
-
-    // Apply CSS animation playback rate via CDP. This slows down (or speeds up)
-    // ALL animations in the page without modifying the HTML/CSS.
-    // Use case: Dominion CSS animations finish in ~2.6s real-time, which feels
-    // too fast on YouTube playback. Setting rate=0.6 stretches them to ~4.3s.
-    if (playbackRate !== 1.0) {
-      const client = await page.createCDPSession();
-      try {
-        await client.send('Animation.enable');
-        await client.send('Animation.setPlaybackRate', { playbackRate });
-        console.log(`  CDP Animation.setPlaybackRate(${playbackRate}) applied`);
-      } catch (e) {
-        console.warn(`  WARN: failed to set playbackRate: ${e.message}. Continuing at 1.0x.`);
-      }
-    }
 
     console.log(`  starting capture loop`);
     const intervalMs = 1000 / targetFps;
