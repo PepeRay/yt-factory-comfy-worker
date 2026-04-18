@@ -45,7 +45,9 @@ import runpod
 import r2_helper
 
 PROJECTS_ROOT = "/tmp/projects"
-DEFAULT_FPS = 30
+DEFAULT_OUTPUT_FPS = 30
+CAPTURE_FPS = 15           # Chromium screenshot loop rate; encoding upsamples to OUTPUT_FPS
+ANIMATION_CAPTURE_SEC = 3.5  # active capture window — Dominion animations finish ~2.6s, +0.9s buffer
 RENDER_TIMEOUT_SEC = 240   # 4 min hard cap for Puppeteer render
 ENCODE_TIMEOUT_SEC = 120   # 2 min hard cap for ffmpeg encode
 
@@ -124,19 +126,25 @@ def _handler_impl(work_dir, html_url, duration_sec, scene_id, video_id, channel)
     frames_dir = os.path.join(work_dir, "frames")
     os.makedirs(frames_dir, exist_ok=True)
 
-    fps = DEFAULT_FPS
-    target_frames = int(round(duration_sec * fps))
+    output_fps = DEFAULT_OUTPUT_FPS
+    # Active capture window — animation phase. Cap at duration_sec for very
+    # short scenes (rare; most scenes are >= 5s).
+    animation_sec = min(ANIMATION_CAPTURE_SEC, duration_sec)
+    hold_final_sec = max(0.0, duration_sec - animation_sec)
+    target_capture_frames = int(round(animation_sec * CAPTURE_FPS))
+
     print(
-        f"[2/4] Rendering ~{target_frames} frames @ {fps}fps "
-        f"({duration_sec}s) via Puppeteer"
+        f"[2/4] Rendering {target_capture_frames} frames @ {CAPTURE_FPS}fps "
+        f"capture rate over {animation_sec}s active animation "
+        f"(+ {hold_final_sec:.1f}s static hold = {duration_sec}s total MP4)"
     )
 
     render_cmd = [
         "node", "/app/render.js",
         html_path,
         frames_dir,
-        str(duration_sec),
-        str(fps),
+        str(animation_sec),
+        str(CAPTURE_FPS),
     ]
 
     render_result = subprocess.run(
@@ -153,12 +161,16 @@ def _handler_impl(work_dir, html_url, duration_sec, scene_id, video_id, channel)
             f"STDERR: {render_result.stderr[-2000:]}"
         )
 
+    # Print renderer stdout for telemetry (real fps achieved, etc.)
+    if render_result.stdout:
+        for line in render_result.stdout.strip().split('\n'):
+            print(f"    [renderer] {line}")
+
     captured = sorted(
         f for f in os.listdir(frames_dir)
         if f.startswith("frame_") and f.endswith(".png")
     )
     actual_frame_count = len(captured)
-    print(f"    Captured {actual_frame_count} frames")
 
     if actual_frame_count == 0:
         raise RuntimeError(
@@ -166,37 +178,46 @@ def _handler_impl(work_dir, html_url, duration_sec, scene_id, video_id, channel)
             f"Renderer stdout:\n{render_result.stdout[-1000:]}"
         )
 
-    if actual_frame_count < 30:
+    if actual_frame_count < 10:
         print(
-            f"    WARN: captured only {actual_frame_count} frames in {duration_sec}s "
-            f"— output may look choppy"
+            f"    WARN: captured only {actual_frame_count} frames "
+            f"— animation may look choppy"
         )
 
-    # ── 3. Encode frames → MP4 with ffmpeg ──
-    # Chromium screencast on CPU emits frames at ~5-15fps depending on visual
-    # complexity, NOT the requested 30fps. To produce an MP4 with the correct
-    # duration matching the scene narration, we:
-    #   - Compute actual_fps = captured_frames / wall_duration_sec
-    #   - Use that as ffmpeg INPUT framerate (so each PNG maps to correct timestamp)
-    #   - Force OUTPUT framerate to 30fps (ffmpeg duplicates frames for smoothness)
-    # Result: MP4 duration == duration_sec (correct), 30fps standard playback.
+    # ── 3. Encode frames → MP4 with ffmpeg (animation + static hold) ──
+    # Strategy:
+    #   1. ffmpeg input: PNG sequence captured at uniform CAPTURE_FPS rate.
+    #      Real capture rate may be lower if screenshots are slow on CPU,
+    #      so we compute actual_capture_fps = captured / animation_sec and
+    #      use that as input rate (ensures animations play at real time).
+    #   2. tpad filter: clones the LAST frame for hold_final_sec seconds,
+    #      giving the viewer time to read the final composition.
+    #   3. Output rate forced to OUTPUT_FPS (ffmpeg duplicates as needed).
+    # Result: smooth uniform playback during animation + N seconds static
+    # hold of the completed infographic + total MP4 duration == duration_sec.
     mp4_path = os.path.join(work_dir, f"scene_{scene_id}_infographic.mp4")
-    actual_fps = actual_frame_count / duration_sec
+    actual_capture_fps = actual_frame_count / animation_sec
     print(
-        f"[3/4] Encoding {actual_frame_count} frames @ {actual_fps:.2f} real fps "
-        f"-> MP4 (target {duration_sec}s, output {fps}fps, libx264 CRF 18)"
+        f"[3/4] Encoding {actual_frame_count} frames @ {actual_capture_fps:.2f} real fps "
+        f"+ {hold_final_sec:.2f}s static hold "
+        f"-> MP4 ({duration_sec}s total, {output_fps}fps output, libx264 CRF 18)"
     )
 
+    # Conditional filter: tpad only if hold_final_sec > 0
     encode_cmd = [
         "ffmpeg", "-y",
         "-loglevel", "warning",
-        "-framerate", f"{actual_fps:.3f}",
+        "-framerate", f"{actual_capture_fps:.3f}",
         "-i", os.path.join(frames_dir, "frame_%05d.png"),
+    ]
+    if hold_final_sec > 0.05:  # epsilon to avoid noise filter for tiny holds
+        encode_cmd += ["-vf", f"tpad=stop_mode=clone:stop_duration={hold_final_sec:.3f}"]
+    encode_cmd += [
         "-c:v", "libx264",
         "-preset", "medium",
         "-crf", "18",
         "-pix_fmt", "yuv420p",
-        "-r", str(fps),
+        "-r", str(output_fps),
         "-movflags", "+faststart",
         mp4_path,
     ]
@@ -234,9 +255,11 @@ def _handler_impl(work_dir, html_url, duration_sec, scene_id, video_id, channel)
         "mp4_url": mp4_url,
         "r2_key": r2_key,
         "duration_actual_sec": round(duration_sec, 3),  # MP4 duration matches request
+        "animation_sec": round(animation_sec, 3),
+        "hold_final_sec": round(hold_final_sec, 3),
         "frames_captured": actual_frame_count,
-        "real_capture_fps": round(actual_fps, 2),
-        "output_fps": fps,
+        "real_capture_fps": round(actual_capture_fps, 2),
+        "output_fps": output_fps,
         "file_size_bytes": file_size,
         "elapsed_sec": round(elapsed, 2),
     }
