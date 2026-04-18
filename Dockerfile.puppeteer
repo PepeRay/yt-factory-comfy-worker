@@ -1,0 +1,97 @@
+# === YouTube Factory — Puppeteer Endpoint (CPU slim) ===
+# Renders HTML infographics (CSS @keyframes animations) to MP4 via headless
+# Chromium controlled from Node.js, then encodes frames with ffmpeg and
+# uploads the result to R2. Pure CPU workload — no GPU needed (CSS paint
+# is CPU-bound, no WebGL involved).
+#
+# Used by the CPU endpoint `yt-factory-puppeteer` (id pending — see
+# Arquitectura Tecnica once provisioned). Triggered by the n8n Infographic
+# Pipeline workflow when Sheet Aut transitions `infographic_status=processing`.
+#
+# Contains:
+#   - Node 20 + puppeteer-core (uses system Chromium, no bundled download)
+#   - Chromium from Debian bookworm apt (~250 MB)
+#   - Python 3.12 + runpod SDK + boto3 + requests for the handler orchestrator
+#   - ffmpeg + ffprobe for PNG frames -> MP4 encoding
+#   - Liberation/Noto/DejaVu fonts + Color Emoji for proper glyph coverage
+#     (Google Fonts CDN fallback + emoji rendering since infographic icons
+#     are emojis per visual-maestro convention)
+#   - handler_puppeteer.py + render.js + r2_helper.py
+#
+# Does NOT contain: ComfyUI, GPU drivers, video models, PyTorch.
+#
+# Image size target: ~600-800 MB. Cold start: ~30-45s first pull, <5s warm.
+#
+# Why CPU vs GPU (validated 2026-04-18):
+#   - CSS @keyframes are pure paint work — GPU adds zero value
+#   - CPU3/CPU5 endpoints are 15x cheaper per second than 24GB GPU
+#   - 9x more RAM available on CPU5 (124 GB total vs 24 GB shared on GPU)
+#   - No OOM risk vs GPU compose situation that triggered the CPU split
+#     (lecciones #40, #44, #45)
+#
+# Rebuild triggers (via .github/workflows/build-split.yml):
+#   - Dockerfile.puppeteer
+#   - handler_puppeteer.py
+#   - render.js
+#   - r2_helper.py
+#
+# Deployment note: template + endpoint must be created MANUALLY via RunPod UI
+# the first time (lección #39 — REST CPU endpoint creation silently falls
+# back to GPU). After first manual setup, the imageName can be auto-PATCHed
+# from CI by adding an `update-runpod-puppeteer` job analogous to
+# `update-runpod-{audio,video}` jobs.
+
+FROM node:20-bookworm-slim
+
+# ── System deps: Chromium + ffmpeg + Python + fonts ──
+RUN apt-get update && \
+    apt-get install -y --no-install-recommends \
+        chromium \
+        ffmpeg \
+        python3 \
+        python3-pip \
+        ca-certificates \
+        fonts-liberation \
+        fonts-noto-color-emoji \
+        fonts-dejavu-core \
+        libnss3 \
+        libatk-bridge2.0-0 \
+        libxss1 \
+        libgtk-3-0 \
+        libdrm2 \
+        libgbm1 \
+        libasound2 \
+        curl && \
+    rm -rf /var/lib/apt/lists/*
+
+# ── Python deps: runpod SDK + R2 client ──
+# --break-system-packages: PEP 668 protects system Python on Debian, but we
+# own the container so a venv adds no value, only complexity.
+RUN pip3 install --no-cache-dir --break-system-packages \
+        runpod \
+        boto3 \
+        requests
+
+# ── Node deps: puppeteer-core (no bundled Chromium) ──
+WORKDIR /app
+
+# Skip Puppeteer's bundled Chromium download — we use system chromium
+ENV PUPPETEER_SKIP_DOWNLOAD=true
+ENV CHROMIUM_PATH=/usr/bin/chromium
+
+RUN npm init -y && \
+    npm install --omit=dev puppeteer-core@^23.0.0 && \
+    npm cache clean --force
+
+# ── Handler + renderer + R2 helper ──
+COPY handler_puppeteer.py /app/handler.py
+COPY render.js /app/render.js
+COPY r2_helper.py /app/r2_helper.py
+
+# Build-time gate: verify Chromium can launch
+RUN chromium --version || (echo "Chromium failed to launch" && exit 1)
+
+CMD ["python3", "/app/handler.py"]
+
+LABEL description="YT Factory Puppeteer — CPU image for HTML->MP4 rendering of animated infographics"
+LABEL version="v1"
