@@ -75,29 +75,17 @@ async function render(htmlPath, framesDir, animationSec, targetFps, playbackRate
       deviceScaleFactor: 1,
     });
 
-    // Apply CSS animation playback rate via CDP BEFORE navigation. CSS
-    // animations start as soon as the document renders — if we set the rate
-    // AFTER goto, they have already been running at 1.0x for ~1-2s and we
-    // only catch the tail. Pre-navigation setup ensures animations run at the
-    // configured rate from frame 0.
-    // Also inject an init script as a redundant safety net: it slows down
-    // animations via direct style.animationDuration mutation in case CDP
-    // setPlaybackRate misses some animations (it can be unreliable for
-    // CSS @keyframes vs Web Animations API in some Chromium versions).
+    // Apply CSS animation slowdown via DOM mutation BEFORE navigation.
+    // History: v3 used BOTH CDP Animation.setPlaybackRate + evaluateOnNewDocument
+    // DOM injection as "belt-and-suspenders". This caused DOUBLE slowdown when
+    // both worked (observed 2026-04-18 with Dominion scene_007: .hero-card
+    // element disappeared during static hold because double slowdown broke
+    // animation-fill-mode: forwards persistence). Fix: use ONLY the DOM
+    // injection approach. It is deterministic across Chromium versions and
+    // works for CSS @keyframes (which CDP setPlaybackRate handles
+    // inconsistently for some versions). Pre-navigation via
+    // evaluateOnNewDocument ensures it runs before any paint.
     if (playbackRate !== 1.0) {
-      const client = await page.createCDPSession();
-      try {
-        await client.send('Animation.enable');
-        await client.send('Animation.setPlaybackRate', { playbackRate });
-        console.log(`  CDP Animation.setPlaybackRate(${playbackRate}) set BEFORE navigation`);
-      } catch (e) {
-        console.warn(`  WARN: CDP setPlaybackRate failed: ${e.message}`);
-      }
-
-      // Belt-and-suspenders: inject a script that runs on every new document,
-      // walking the DOM and dividing animation-duration / animation-delay by
-      // playbackRate. Equivalent to multiplying their wall-clock duration by
-      // (1/playbackRate), which is exactly what slowing down means.
       const slowFactor = 1 / playbackRate;
       await page.evaluateOnNewDocument((factor) => {
         const apply = () => {
@@ -112,16 +100,21 @@ async function render(htmlPath, framesDir, animationSec, targetFps, playbackRate
             const tDel = parseFloat(cs.transitionDelay);
             if (tDur && tDur > 0) el.style.transitionDuration = `${(tDur * factor).toFixed(3)}s`;
             if (tDel && tDel > 0) el.style.transitionDelay = `${(tDel * factor).toFixed(3)}s`;
+            // CRITICAL (lesson from scene_007 bug): force fill-mode=both on
+            // animated elements so they persist at 'to' state after finishing.
+            // Without this, playback rate modification can cause Chromium to
+            // lose 'forwards' semantics and the element snaps back to 'from'
+            // state (opacity:0 etc), making it invisible during the static hold.
+            if (dur && dur > 0) el.style.animationFillMode = 'both';
           });
         };
-        // Run as early as possible, then again on DOMContentLoaded for safety
         if (document.readyState === 'loading') {
           document.addEventListener('DOMContentLoaded', apply, { once: true });
         } else {
           apply();
         }
       }, slowFactor);
-      console.log(`  Inject script: slowFactor=${slowFactor}x (anim/transition duration *= ${slowFactor})`);
+      console.log(`  DOM slowdown injected: factor=${slowFactor}x (single layer — no CDP to avoid double slowdown, + force fill-mode=both)`);
     }
 
     const fileUrl = `file://${path.resolve(htmlPath)}`;
