@@ -597,6 +597,46 @@ def handler(job):
             except Exception as e:
                 print(f"[WARN] txt-voice R2 existence check failed ({e}), proceeding with TTS")
 
+    # Cross-worker audio pre-fetch (2026-04-18): voice-srt jobs receive a
+    # workflow with VHS_LoadAudio pointing to a /tmp/projects/... path that
+    # was produced by the concat_audio job on a *different* worker. Since
+    # /tmp is per-container tmpfs, this worker's filesystem doesn't have the
+    # file, and ComfyUI rejects the prompt with custom_validation_failed
+    # ("Invalid file path: /tmp/projects/..."). Fix: detect the missing local
+    # file, resolve the R2 key (explicit from payload or derived from the
+    # path pattern /tmp/projects/{ch}/{cid}/outputs/{plat}/{fname} →
+    # {ch}/{cid}/output/{plat}/{fname}), download from R2, and let the
+    # workflow proceed with the now-present local path. Matches the I4c
+    # pattern: pre-fetch before queue_prompt, no changes to the workflow
+    # shape downstream. Fail-loud if audio can't be resolved — SRT can't
+    # run without its source audio.
+    if job_type == "voice-srt" and R2_ENABLED:
+        try:
+            audio_node_id = None
+            audio_file_path = None
+            for nid, node in workflow.items():
+                if isinstance(node, dict) and node.get("class_type") == "VHS_LoadAudio":
+                    audio_node_id = nid
+                    audio_file_path = node.get("inputs", {}).get("audio_file")
+                    break
+            if audio_file_path and not os.path.exists(audio_file_path):
+                audio_r2_key = job_input.get("audio_r2_key")
+                if not audio_r2_key and audio_file_path.startswith(PROJECTS_ROOT + "/") and "/outputs/" in audio_file_path:
+                    rel = audio_file_path[len(PROJECTS_ROOT) + 1:]
+                    left, sep, right = rel.partition("/outputs/")
+                    if sep and left and right:
+                        audio_r2_key = f"{left}/output/{right}"
+                if not audio_r2_key:
+                    return {"error": f"voice-srt: audio_file missing locally and no R2 key derivable: {audio_file_path}"}
+                if not r2_helper.file_exists(audio_r2_key):
+                    return {"error": f"voice-srt: audio_file not in R2 either (key={audio_r2_key}, local={audio_file_path})"}
+                os.makedirs(os.path.dirname(audio_file_path), exist_ok=True)
+                r2_helper.download_file(audio_r2_key, audio_file_path)
+                size_mb = os.path.getsize(audio_file_path) / 1024 / 1024
+                print(f"[INFO] voice-srt: pre-fetched audio from R2 ({audio_r2_key}, {size_mb:.2f} MB) to {audio_file_path}")
+        except Exception as e:
+            return {"error": f"voice-srt audio R2 pre-fetch failed: {e}"}
+
     try:
         wait_for_comfyui()
     except RuntimeError as e:
