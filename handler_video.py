@@ -1246,6 +1246,66 @@ def _compose_scene_manifest_impl(src, dest, content_id, config, channel, platfor
                     segment_paths.append({"path": seg_path, "scene": scene})
                     continue
 
+            if render_type == "infographic":
+                # Infographic scenes: pre-rendered MP4 from yt-factory-infographics
+                # endpoint (Puppeteer + ffmpeg). The MP4 already has CSS animations
+                # captured at 0.6x playback rate + static hold + EXACT duration_sec
+                # via the handler's tpad logic. Compose responsibility = just
+                # normalize to its standard format (1920x1080, 30fps, NVENC).
+                # No re-render, no Wan, no GPU work needed.
+                clip_path = os.path.join(vid_dir, f"scene_{sid:03d}_infographic.mp4")
+                if not os.path.exists(clip_path):
+                    # Tolerate looser naming variants (e.g. scene_7 vs scene_007)
+                    candidates = sorted(glob_module.glob(
+                        os.path.join(vid_dir, f"scene_{sid:03d}*infographic*.mp4")
+                    )) or sorted(glob_module.glob(
+                        os.path.join(vid_dir, f"scene_{sid}_infographic*.mp4")
+                    ))
+                    clip_path = candidates[0] if candidates else clip_path
+                if not os.path.exists(clip_path):
+                    raise FileNotFoundError(
+                        f"scene {sid}: render_type=infographic but no MP4 found "
+                        f"at {clip_path}. The Infographic Pipeline (n8n workflow "
+                        f"8tqQygH1WEtl1yKX) likely failed or did not run for this "
+                        f"video. Check infographic_status in Sheet Aut — should "
+                        f"be 'ready' before video compose runs."
+                    )
+                # Duration is already exact from the Puppeteer handler's tpad
+                # static-hold logic — no pad/trim needed (unlike video_clip which
+                # has Wan 2.2's hardcoded 5.0625s constraint).
+                norm_args = [
+                    "-vf",
+                    f"scale={WIDTH}:{HEIGHT}:force_original_aspect_ratio=increase,"
+                    f"crop={WIDTH}:{HEIGHT},setsar=1",
+                    "-r", str(FPS),
+                    *NVENC_NORM_ARGS, "-an",
+                ]
+                cmd = ["ffmpeg", "-y", "-i", clip_path] + norm_args + [seg_path]
+                result = _run_ffmpeg_with_nvenc_fallback(
+                    cmd, timeout=120, label=f"infographic_norm sid={sid}"
+                )
+                if result.returncode != 0:
+                    raise RuntimeError(
+                        f"segment {sid} infographic normalization failed: "
+                        f"{result.stderr[-200:]}"
+                    )
+                # Generate silent ambient AAC. Infographics never have narration
+                # baked in — narration comes from the main concat audio that gets
+                # mixed downstream in Phase 3 (full video mux).
+                sil_cmd = [
+                    "ffmpeg", "-y", "-f", "lavfi",
+                    "-i", "anullsrc=r=44100:cl=stereo",
+                    "-t", str(duration), "-c:a", "aac", amb_path,
+                ]
+                subprocess.run(sil_cmd, capture_output=True, text=True, timeout=30)
+                print(
+                    f"[infographic sid={sid}] normalized "
+                    f"{os.path.basename(clip_path)} -> {os.path.basename(seg_path)} "
+                    f"({duration}s)"
+                )
+                segment_paths.append({"path": seg_path, "scene": scene})
+                continue
+
             if render_type == "crossfade":
                 # Crossfade between two images
                 img_a = _find_image(img_dir, sid, "initial")
