@@ -1971,7 +1971,7 @@ def _compose_scene_manifest_impl(src, dest, content_id, config, channel, platfor
         filter_parts.append(f"[{narr_idx}:a]volume=1.0[narr]")
         audio_inputs.append("[narr]")
     if music_idx is not None:
-        filter_parts.append(f"[{music_idx}:a]volume=0.20[music]")
+        filter_parts.append(f"[{music_idx}:a]volume=0.30[music]")
         audio_inputs.append("[music]")
     if amb_idx is not None:
         # Ambient disabled — video models generate full clips with audio handled separately
