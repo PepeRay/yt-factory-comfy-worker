@@ -857,7 +857,17 @@ def _render_multi_crossfade(
             if res.returncode != 0:
                 raise RuntimeError(f"multi_xf sid={sid} xfade iter {i}: {res.stderr[-300:]}")
             merged = iter_out
-            cum_dur = cum_dur + base_dur + (xf_dur if i < n - 1 else 0)
+            # Lesson #63 (2026-04-19): xfade CONSUMES xf_dur of overlap, so the
+            # merged timeline only grows by base_dur per iteration regardless of
+            # whether the incoming seg has a +xf_dur extension. Previous code
+            # added xf_dur for i<n-1 iters, causing cum_dur to drift ahead of
+            # the real timeline. The next iter's offset = cum_dur - xf_dur then
+            # exceeded the real merged length, so ffmpeg xfade produced near-no-op
+            # output (drop of new content). Effect: multi_xf segments rendered
+            # ~half of target (~10s short per N=4 scene). Across 15 multi_xf
+            # scenes in video 0001 this accumulated ~99s of drift, triggering
+            # Phase 2.5 safety pad which introduced a visible ~90s tail artifact.
+            cum_dur = cum_dur + base_dur
 
         shutil.move(merged, output_path)
 
