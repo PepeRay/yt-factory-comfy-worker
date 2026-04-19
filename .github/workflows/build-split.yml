@@ -201,10 +201,6 @@ jobs:
     # saveTemplate mutation which requires all fields).
     # Pins by full commit SHA (40 chars), never :latest — policy 2026-04-13.
     # Verifies image exists in GHCR before patching to fail fast on bad tags.
-    # Note about Images: not auto-updated here because the images template
-    # currently points to a -base image (not the monolithic CI-built image),
-    # and switching to the monolithic requires a manual validation cycle that
-    # has not been done yet. Pending tech debt — see Arquitectura Técnica backlog.
     needs: build-audio
     if: needs.build-audio.result == 'success'
     runs-on: ubuntu-latest
@@ -261,6 +257,71 @@ jobs:
           fi
 
           echo "=== RunPod audio template updated successfully ==="
+          echo "Template ID  : ${TEMPLATE_ID}"
+          echo "New imageName: ${UPDATED_IMAGE}"
+
+  update-runpod-images:
+    # Auto-updates the RunPod images template (id 7y8167cpbf) when build-images
+    # succeeds. Added 2026-04-19 after the monolithic migration cycle — prior to
+    # that the template pointed to an orphan -base image (lesson #48). Migration
+    # validated with a real thumbnail regen job producing correct output (11s
+    # exec time, text overlay defaults 180pt/12px no-vignette verified).
+    # Pins by full commit SHA (40 chars), never :latest.
+    needs: build-images
+    if: needs.build-images.result == 'success'
+    runs-on: ubuntu-latest
+    steps:
+      - name: Verify image exists in GHCR + PATCH RunPod images template
+        env:
+          RUNPOD_API_KEY: ${{ secrets.RUNPOD_API_KEY }}
+          GHCR_PULL_TOKEN: ${{ secrets.GITHUB_TOKEN }}
+          TEMPLATE_ID: 7y8167cpbf
+          NEW_IMAGE: ${{ needs.build-images.outputs.image_tag }}
+        run: |
+          set -euo pipefail
+
+          if [ -z "${RUNPOD_API_KEY:-}" ]; then
+            echo "ERROR: RUNPOD_API_KEY secret is missing"
+            exit 1
+          fi
+
+          REPO_TAG="${NEW_IMAGE#ghcr.io/}"
+          REPO="${REPO_TAG%:*}"
+          TAG="${REPO_TAG##*:}"
+          echo "Verifying ${REPO}:${TAG} exists in GHCR..."
+
+          GHCR_TOKEN=$(curl -sS -u "x:${GHCR_PULL_TOKEN}" \
+            "https://ghcr.io/token?service=ghcr.io&scope=repository:${REPO}:pull" | jq -r '.token')
+
+          HTTP_CODE=$(curl -sS -o /dev/null -w "%{http_code}" -I \
+            -H "Authorization: Bearer ${GHCR_TOKEN}" \
+            -H "Accept: application/vnd.oci.image.index.v1+json,application/vnd.docker.distribution.manifest.v2+json" \
+            "https://ghcr.io/v2/${REPO}/manifests/${TAG}")
+
+          if [ "$HTTP_CODE" != "200" ]; then
+            echo "ERROR: Image ${NEW_IMAGE} not found in GHCR (HTTP ${HTTP_CODE})"
+            exit 1
+          fi
+          echo "✓ Image manifest found in GHCR"
+
+          echo "PATCHing RunPod images template (id=${TEMPLATE_ID})..."
+          PATCH_BODY=$(jq -cn --arg img "$NEW_IMAGE" '{imageName: $img}')
+
+          RESPONSE=$(curl -sS -X PATCH "https://rest.runpod.io/v1/templates/${TEMPLATE_ID}" \
+            -H "Authorization: Bearer ${RUNPOD_API_KEY}" \
+            -H "Content-Type: application/json" \
+            -d "$PATCH_BODY")
+
+          UPDATED_IMAGE=$(echo "$RESPONSE" | jq -r '.imageName // empty')
+          if [ "$UPDATED_IMAGE" != "$NEW_IMAGE" ]; then
+            echo "ERROR: PATCH did not apply correctly"
+            echo "Expected: ${NEW_IMAGE}"
+            echo "Got     : ${UPDATED_IMAGE}"
+            echo "Response: ${RESPONSE}" | jq -r 'del(.env)'
+            exit 1
+          fi
+
+          echo "=== RunPod images template updated successfully ==="
           echo "Template ID  : ${TEMPLATE_ID}"
           echo "New imageName: ${UPDATED_IMAGE}"
 
