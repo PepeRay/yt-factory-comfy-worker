@@ -1640,7 +1640,17 @@ def _compose_scene_manifest_impl(src, dest, content_id, config, channel, platfor
                 "-i", concat_list, "-r", str(FPS),
                 *NVENC_HQ_ARGS, "-an", concat_out,
             ]
-            result = _run_ffmpeg_with_nvenc_fallback(cmd, timeout=600, label=f"phase2_concat {i}")
+            # Timeout scales with total output length. Late iterations on CPU
+            # endpoints with libx264 fallback re-encode the full merged+seg,
+            # which can exceed 10min on full-length videos (~680s).
+            try:
+                _seg_dur_est = _get_video_duration(seg["path"])
+                _merged_dur_est = _get_video_duration(merged_path)
+                _total_est = _seg_dur_est + _merged_dur_est
+            except Exception:
+                _total_est = 700
+            concat_timeout = max(600, min(1800, int(_total_est * 3) + 120))
+            result = _run_ffmpeg_with_nvenc_fallback(cmd, timeout=concat_timeout, label=f"phase2_concat {i}")
             try:
                 os.remove(concat_list)
             except OSError:
@@ -1682,7 +1692,14 @@ def _compose_scene_manifest_impl(src, dest, content_id, config, channel, platfor
                 f"[0:v][1:v]xfade=transition={xfade_name}:duration={t_dur}:offset={offset}",
                 *NVENC_HQ_ARGS, xfade_out
             ]
-            result = _run_ffmpeg_with_nvenc_fallback(cmd, timeout=300, label=f"xfade {xfade_name}")
+            # Timeout scales with merged length. xfade requires re-encoding the
+            # ENTIRE merged video, so late iterations on CPU endpoints with
+            # libx264 fallback can exceed 5min on full-length videos (~680s).
+            # Observed 2026-04-19: Phase 2 last iter (merged_0053 + seg_0054)
+            # timed out at 300s with libx264 -preset fast -crf 18. Generous
+            # budget: ~3x realtime on CPU, capped at 30min.
+            xfade_timeout = max(300, min(1800, int(merged_dur * 3) + 120))
+            result = _run_ffmpeg_with_nvenc_fallback(cmd, timeout=xfade_timeout, label=f"xfade {xfade_name}")
             if result.returncode != 0:
                 print(f"WARN: xfade {transition} failed at scene {scene['scene_id']}, falling back to cut")
                 # Fallback to concat
