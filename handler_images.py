@@ -262,41 +262,40 @@ def apply_text_overlay(image_path, overlay_text, output_path, config=None):
     font = DEFAULT_FONT
     color = cfg.get("thumb_color", "#FFFFFF")
     outline_color = cfg.get("thumb_outline", "#000000")
-    pointsize = cfg.get("thumb_pointsize", "96")
-    stroke_width = cfg.get("thumb_stroke_width", "5")
+    # Defaults tier documentary/Magnates (2026-04-19): text occupies 30-40% of frame height,
+    # thick stroke for embossed feel. Prior defaults (96pt/5px) produced unreadable
+    # 120px mobile thumbs (validated empirically with 0001 "DEBT IS A LEASH").
+    pointsize = cfg.get("thumb_pointsize", "180")
+    stroke_width = cfg.get("thumb_stroke_width", "12")
 
-    # ImageMagick: resize → shadow layer → outlined text → fill text
-    # gravity North + offset +0+80 = upper ~25% of frame
+    # ImageMagick: resize → outlined text → fill text (no vignette — text is its own oasis)
+    # gravity North + offset +0+70 = upper third of frame
     # Avoids YouTube timestamp (bottom-right) and progress bar (bottom)
     cmd = [
         "convert", image_path,
         "-resize", "1280x720^", "-gravity", "center", "-extent", "1280x720",
-        # Semi-transparent dark gradient behind text for "oasis of contrast"
-        "(", "-size", "1280x200", "gradient:rgba(0,0,0,0.7)-rgba(0,0,0,0)",
-        ")",
-        "-gravity", "North", "-composite",
-        # Blurred shadow behind text for depth — drawn on transparent canvas
+        # Strong shadow behind text for depth — drawn on transparent canvas
         # so blur affects ONLY the text, not the entire frame.
         "(", "-size", "1280x720", "xc:transparent",
         "-font", font,
         "-pointsize", str(pointsize),
         "-fill", "black",
         "-gravity", "North",
-        "-annotate", "+5+85", overlay_text,
-        "-blur", "0x3",
+        "-annotate", "+8+78", overlay_text,
+        "-blur", "0x8",
         ")",
         "-composite",
-        # Crisp text with outline
+        # Crisp text with thick outline (documentary tier)
         "-font", font,
         "-pointsize", str(pointsize),
         "-gravity", "North",
         "-stroke", outline_color,
         "-strokewidth", str(stroke_width),
-        "-annotate", "+0+80", overlay_text,
+        "-annotate", "+0+70", overlay_text,
         # Fill text on top of outline
         "-stroke", "none",
         "-fill", color,
-        "-annotate", "+0+80", overlay_text,
+        "-annotate", "+0+70", overlay_text,
         output_path,
     ]
 
@@ -523,8 +522,9 @@ def handler(job):
         overlay_config = {
             "thumb_color": job_input.get("thumb_color", "#FFFFFF"),
             "thumb_outline": job_input.get("thumb_outline", "#000000"),
-            "thumb_pointsize": job_input.get("thumb_pointsize", "80"),
-            "thumb_stroke_width": job_input.get("thumb_stroke_width", "5"),
+            # Defaults tier documentary/Magnates (2026-04-19) — must match apply_text_overlay
+            "thumb_pointsize": job_input.get("thumb_pointsize", "180"),
+            "thumb_stroke_width": job_input.get("thumb_stroke_width", "12"),
         }
 
         result_path = apply_text_overlay(base_image, overlay_text, thumb_output, overlay_config)
