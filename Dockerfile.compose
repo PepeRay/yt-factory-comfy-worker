@@ -35,16 +35,29 @@
 
 FROM python:3.12-slim
 
-# ── System deps: ffmpeg + ffprobe (all codecs needed for compose phases) ──
+# ── System deps: ffmpeg + ffprobe + fonts (all codecs needed for compose phases) ──
 # libx264, libx265 (fallback), aac, libmp3lame, libopus, subtitle filters,
 # xfade transitions, overlay filter. The `ffmpeg` package from Debian
 # bookworm ships with all of these enabled by default.
+# fonts-dejavu-core + fontconfig: default fallback fonts for libass when
+# rendering captions (compose_full, render-short).
 RUN apt-get update && \
     apt-get install -y --no-install-recommends \
         ffmpeg \
         curl \
-        ca-certificates && \
+        ca-certificates \
+        fonts-dejavu-core \
+        fontconfig \
+        wget && \
     rm -rf /var/lib/apt/lists/*
+
+# ── Bebas Neue font (used by render-short kinetic caption style) ──
+# Pattern mirrors Dockerfile.base.images (lesson #14). Installed system-wide
+# so libass in ffmpeg subtitles filter can resolve "Bebas Neue" by fontname.
+RUN mkdir -p /usr/local/share/fonts/bebas-neue && \
+    wget -q -O /usr/local/share/fonts/bebas-neue/BebasNeue-Regular.ttf \
+        "https://github.com/google/fonts/raw/main/ofl/bebasneue/BebasNeue-Regular.ttf" && \
+    fc-cache -fv
 
 # ── Python deps ──
 # runpod: serverless worker SDK

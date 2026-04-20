@@ -2128,6 +2128,298 @@ def _compose_full(src, dest, content_id, config):
              "size_mb": round(os.path.getsize(output_path) / 1024 / 1024, 2)}]
 
 
+# ── Shorts rendering (9:16 vertical with burned captions) ─────────────
+# Added 2026-04-20 for Shorts Pipeline (see Arquitectura Tecnica.md).
+# Takes an already-rendered final.mp4 (16:9) plus its SRT, produces a
+# 9:16 vertical MP4 trimmed to [t_start, t_end] with center-crop and
+# burned kinetic captions. Runs on the Compose CPU endpoint — no GPU,
+# no ComfyUI, no models. Pure ffmpeg pipeline.
+
+_SHORT_MIN_DURATION = 15.0
+_SHORT_MAX_DURATION = 60.0
+
+# Caption styles for Shorts. Each style renders as an .ass ScriptInfo +
+# Style block; the events are generated from the subset SRT.
+# Keep styles simple and readable — viewer sees the video on a phone at
+# ~4 inches, so font must be chunky and outline must survive compression.
+_SHORT_CAPTION_STYLES = {
+    "kinetic": {
+        "font": "Bebas Neue",
+        "fontsize": 72,
+        "primary": "&H00FFFFFF",   # white
+        "outline_color": "&H00000000",  # black
+        "back_color": "&H80000000",  # 50% black shadow
+        "outline": 4,
+        "shadow": 2,
+        "bold": 1,
+        "alignment": 2,  # bottom-center
+        "margin_v": 120,
+    },
+    "classic": {
+        "font": "Arial",
+        "fontsize": 56,
+        "primary": "&H00FFFFFF",
+        "outline_color": "&H00000000",
+        "back_color": "&H00000000",
+        "outline": 3,
+        "shadow": 0,
+        "bold": 1,
+        "alignment": 2,
+        "margin_v": 140,
+    },
+}
+
+
+def _parse_srt_entries(srt_path):
+    """Parse an .srt file into list of dicts: {index, start, end, text}.
+    Timestamps in seconds. Tolerant to blank lines and CRLF/LF."""
+    with open(srt_path, "r", encoding="utf-8") as f:
+        raw = f.read().replace("\r\n", "\n").replace("\r", "\n")
+    entries = []
+    blocks = [b.strip() for b in raw.split("\n\n") if b.strip()]
+    for block in blocks:
+        lines = block.split("\n")
+        if len(lines) < 2:
+            continue
+        # Line 0 is index (may be missing in some SRTs — tolerate)
+        # Line 1 is timing; rest is text
+        timing_line = None
+        text_lines = []
+        idx = None
+        for i, line in enumerate(lines):
+            if "-->" in line:
+                timing_line = line
+                text_lines = lines[i + 1:]
+                if i > 0:
+                    try:
+                        idx = int(lines[i - 1].strip())
+                    except (ValueError, IndexError):
+                        idx = None
+                break
+        if not timing_line:
+            continue
+        try:
+            start_str, end_str = [p.strip() for p in timing_line.split("-->")]
+            start = _srt_time_to_sec(start_str)
+            end = _srt_time_to_sec(end_str)
+        except Exception:
+            continue
+        text = "\n".join(text_lines).strip()
+        if not text:
+            continue
+        entries.append({"index": idx, "start": start, "end": end, "text": text})
+    return entries
+
+
+def _srt_time_to_sec(t):
+    """Convert SRT timestamp 'HH:MM:SS,mmm' to float seconds."""
+    t = t.replace(",", ".")
+    parts = t.split(":")
+    if len(parts) == 3:
+        h, m, s = parts
+        return int(h) * 3600 + int(m) * 60 + float(s)
+    if len(parts) == 2:
+        m, s = parts
+        return int(m) * 60 + float(s)
+    return float(parts[0])
+
+
+def _sec_to_ass_time(s):
+    """Convert float seconds to ASS timestamp 'H:MM:SS.cc' (centiseconds)."""
+    h = int(s // 3600)
+    m = int((s % 3600) // 60)
+    sec = s - h * 3600 - m * 60
+    return f"{h}:{m:02d}:{sec:05.2f}"
+
+
+def _srt_subset_to_ass(srt_entries, t_start, t_end, ass_path, style_name="kinetic"):
+    """Filter SRT entries to [t_start, t_end], shift to 0-based, write ASS.
+    Returns number of caption events written. 0 if no overlap."""
+    style = _SHORT_CAPTION_STYLES.get(style_name, _SHORT_CAPTION_STYLES["kinetic"])
+
+    # Filter + shift
+    events = []
+    for e in srt_entries:
+        # Skip if completely outside window
+        if e["end"] <= t_start or e["start"] >= t_end:
+            continue
+        # Clip to window
+        s = max(e["start"], t_start) - t_start
+        eend = min(e["end"], t_end) - t_start
+        if eend - s < 0.1:
+            continue
+        # ASS doesn't like newlines in events — join with \N escape
+        text = e["text"].replace("\n", " ").replace("{", "(").replace("}", ")")
+        events.append((s, eend, text))
+
+    # ASS header + style block. PlayResX/Y should match the output (1080x1920).
+    header = [
+        "[Script Info]",
+        "ScriptType: v4.00+",
+        "PlayResX: 1080",
+        "PlayResY: 1920",
+        "WrapStyle: 0",
+        "ScaledBorderAndShadow: yes",
+        "",
+        "[V4+ Styles]",
+        "Format: Name, Fontname, Fontsize, PrimaryColour, SecondaryColour, "
+        "OutlineColour, BackColour, Bold, Italic, Underline, StrikeOut, "
+        "ScaleX, ScaleY, Spacing, Angle, BorderStyle, Outline, Shadow, "
+        "Alignment, MarginL, MarginR, MarginV, Encoding",
+        f"Style: Default,{style['font']},{style['fontsize']},"
+        f"{style['primary']},&H00FFFFFF,{style['outline_color']},{style['back_color']},"
+        f"{style['bold']},0,0,0,100,100,0,0,1,{style['outline']},{style['shadow']},"
+        f"{style['alignment']},80,80,{style['margin_v']},1",
+        "",
+        "[Events]",
+        "Format: Layer, Start, End, Style, Name, MarginL, MarginR, MarginV, Effect, Text",
+    ]
+
+    lines = list(header)
+    for s, e, text in events:
+        lines.append(
+            f"Dialogue: 0,{_sec_to_ass_time(s)},{_sec_to_ass_time(e)},Default,,0,0,0,,{text}"
+        )
+
+    with open(ass_path, "w", encoding="utf-8") as f:
+        f.write("\n".join(lines))
+
+    return len(events)
+
+
+def _render_short(job_input):
+    """Render a single Short from a published long-form final.mp4.
+
+    Inputs (job_input):
+      channel, content_id, short_id (required)
+      timestamp_start, timestamp_end (required, seconds, float)
+      final_video_r2_key (optional; default derived from convention)
+      srt_r2_key (optional; if absent, no captions burned)
+      caption_style (optional; default 'kinetic')
+
+    Output: {status, r2_key, r2_url, duration_sec, size_mb, caption_events}
+    """
+    channel = job_input["channel"]
+    content_id = job_input["content_id"]
+    short_id = job_input["short_id"]
+    t_start = float(job_input["timestamp_start"])
+    t_end = float(job_input["timestamp_end"])
+
+    duration = t_end - t_start
+    if duration < _SHORT_MIN_DURATION:
+        raise RuntimeError(
+            f"Short duration {duration:.1f}s below minimum {_SHORT_MIN_DURATION}s"
+        )
+    if duration > _SHORT_MAX_DURATION:
+        raise RuntimeError(
+            f"Short duration {duration:.1f}s exceeds maximum {_SHORT_MAX_DURATION}s"
+        )
+
+    final_r2_key = job_input.get(
+        "final_video_r2_key",
+        f"{channel}/{content_id}/output/youtube/{content_id}_final.mp4",
+    )
+    srt_r2_key = job_input.get("srt_r2_key")  # optional
+    caption_style = job_input.get("caption_style", "kinetic")
+
+    if not R2_ENABLED:
+        raise RuntimeError("R2 not enabled — Shorts pipeline requires R2 for source + output")
+
+    work_dir = os.path.join(PROJECTS_ROOT, channel, content_id, "shorts_work", short_id)
+    try:
+        os.makedirs(work_dir, exist_ok=True)
+
+        # 1. Download final.mp4 from R2
+        local_final = os.path.join(work_dir, "final.mp4")
+        r2_helper.download_file(final_r2_key, local_final)
+        print(f"[INFO] render-short {short_id}: downloaded final from {final_r2_key}")
+
+        # 2. Download SRT from R2 if provided; build ASS caption subset
+        ass_path = None
+        caption_events = 0
+        if srt_r2_key:
+            local_srt = os.path.join(work_dir, "source.srt")
+            try:
+                r2_helper.download_file(srt_r2_key, local_srt)
+                entries = _parse_srt_entries(local_srt)
+                ass_path = os.path.join(work_dir, "captions.ass")
+                caption_events = _srt_subset_to_ass(
+                    entries, t_start, t_end, ass_path, caption_style
+                )
+                if caption_events == 0:
+                    print(f"[WARN] render-short {short_id}: SRT had no events in window")
+                    ass_path = None
+            except Exception as e:
+                print(f"[WARN] render-short {short_id}: SRT fetch/parse failed, rendering without captions: {e}")
+                ass_path = None
+
+        # 3. Build ffmpeg filter chain
+        # Center-crop 16:9 → 9:16, then scale to 1080x1920
+        # crop=ih*9/16:ih — width = height*9/16, height = source height
+        # Then offset x so crop is centered: x=(iw-ih*9/16)/2
+        vf = "crop=ih*9/16:ih:((iw-ih*9/16)/2):0,scale=1080:1920,setsar=1"
+        if ass_path:
+            # ffmpeg subtitles filter uses colon/backslash-escaped path; on Linux,
+            # the raw path works if we wrap in single quotes. Use the filename
+            # relative to cwd to avoid escaping issues.
+            ass_rel = os.path.basename(ass_path)
+            vf = f"{vf},subtitles='{ass_rel}'"
+
+        # 4. Run ffmpeg: trim + crop + scale + optional captions
+        local_out = os.path.join(work_dir, f"{short_id}.mp4")
+        cmd = [
+            "ffmpeg", "-y",
+            "-ss", f"{t_start:.3f}",
+            "-i", local_final,
+            "-t", f"{duration:.3f}",
+            "-vf", vf,
+            *NVENC_HQ_ARGS,
+            "-c:a", "aac", "-b:a", "192k",
+            "-movflags", "+faststart",
+            local_out,
+        ]
+        # Run from work_dir so the relative 'captions.ass' resolves correctly
+        orig_cwd = os.getcwd()
+        try:
+            os.chdir(work_dir)
+            result = _run_ffmpeg_with_nvenc_fallback(
+                cmd, timeout=300, label=f"render-short-{short_id}"
+            )
+        finally:
+            os.chdir(orig_cwd)
+
+        if result.returncode != 0:
+            raise RuntimeError(
+                f"FFmpeg render-short failed: {result.stderr[-800:]}"
+            )
+
+        if not os.path.exists(local_out):
+            raise RuntimeError(f"Expected output missing: {local_out}")
+
+        size_mb = round(os.path.getsize(local_out) / 1024 / 1024, 2)
+
+        # 5. Upload to R2 at shorts/{short_id}.mp4
+        out_r2_key = f"{channel}/{content_id}/shorts/{short_id}.mp4"
+        r2_helper.upload_file(local_out, out_r2_key)
+        r2_url = r2_helper.presigned_url(out_r2_key)
+        print(f"[INFO] render-short {short_id}: uploaded → {out_r2_key} ({size_mb} MB)")
+
+        return {
+            "status": "success",
+            "short_id": short_id,
+            "r2_key": out_r2_key,
+            "r2_url": r2_url,
+            "duration_sec": round(duration, 2),
+            "size_mb": size_mb,
+            "caption_events": caption_events,
+            "caption_style": caption_style if caption_events > 0 else None,
+        }
+    finally:
+        # Cleanup work dir to avoid disk accumulation across reused workers
+        # (lesson #47: cleanup always runs, success or fail)
+        shutil.rmtree(work_dir, ignore_errors=True)
+
+
 _INPUTS_DOWNLOADED = False
 
 
@@ -2274,9 +2566,31 @@ def handler(job):
         except RuntimeError as e:
             return {"error": str(e), "job_type": job_type}
 
+    # Shorts render jobs (FFmpeg, no ComfyUI needed). Runs on the Compose
+    # CPU endpoint; see Arquitectura Tecnica.md → Shorts Pipeline.
+    if job_type == "render-short":
+        required = ["short_id", "timestamp_start", "timestamp_end"]
+        missing = [f for f in required if f not in job_input]
+        if missing:
+            return {"error": f"render-short missing required fields: {missing}"}
+        try:
+            result = _render_short(job_input)
+            result.update({
+                "job_type": job_type,
+                "channel": channel,
+                "content_id": content_id,
+            })
+            return result
+        except RuntimeError as e:
+            return {
+                "error": str(e),
+                "job_type": job_type,
+                "short_id": job_input.get("short_id"),
+            }
+
     # ComfyUI workflow jobs
     if job_type not in ACCEPTED_JOB_TYPES:
-        return {"error": f"Video endpoint accepts: {list(ACCEPTED_JOB_TYPES.keys()) + ['compose']}. Got: {job_type}"}
+        return {"error": f"Video endpoint accepts: {list(ACCEPTED_JOB_TYPES.keys()) + ['compose', 'render-short']}. Got: {job_type}"}
 
     workflow = job_input.get("workflow")
     if not workflow:
