@@ -7,6 +7,7 @@ Models: Wan 2.2 I2V, FFmpeg
 import json
 import base64
 import os
+import re
 import time
 import uuid
 import subprocess
@@ -2143,16 +2144,32 @@ _SHORT_MAX_DURATION = 60.0
 # Keep styles simple and readable — viewer sees the video on a phone at
 # ~4 inches, so font must be chunky and outline must survive compression.
 _SHORT_CAPTION_STYLES = {
-    "kinetic": {
+    # Premium Hormozi/Mr Beast-inspired: big Bebas, thick outline, word-by-word
+    # reveal, gold highlight on $ amounts + "trillion/billion/million" phrases.
+    # This is the default style emitted by ytf-shorts (caption_style=kinetic_default).
+    "kinetic_default": {
         "font": "Bebas Neue",
-        "fontsize": 72,
-        "primary": "&H00FFFFFF",   # white
+        "fontsize": 96,
+        "primary": "&H00FFFFFF",   # white (BGR)
         "outline_color": "&H00000000",  # black
         "back_color": "&H80000000",  # 50% black shadow
+        "outline": 6,
+        "shadow": 3,
+        "bold": 1,
+        "alignment": 2,  # bottom-center
+        "margin_v": 180,
+        "premium_reveal": True,
+    },
+    "kinetic": {  # legacy — phrase-long, smaller
+        "font": "Bebas Neue",
+        "fontsize": 72,
+        "primary": "&H00FFFFFF",
+        "outline_color": "&H00000000",
+        "back_color": "&H80000000",
         "outline": 4,
         "shadow": 2,
         "bold": 1,
-        "alignment": 2,  # bottom-center
+        "alignment": 2,
         "margin_v": 120,
     },
     "classic": {
@@ -2168,6 +2185,65 @@ _SHORT_CAPTION_STYLES = {
         "margin_v": 140,
     },
 }
+
+
+# Gold highlight for currency + big-number phrases (Hormozi key-term pattern).
+# BGR format; RGB #FFD700 -> BGR &H00D7FF&.
+_PREMIUM_HIGHLIGHT_COLOR = "&H0000D7FF&"
+_PREMIUM_RESET_COLOR = "&H00FFFFFF&"
+
+# Patterns that deserve gold highlight treatment:
+#  - $NNN, $NNN.NN, $NNN trillion/billion/million/thousand, $NNNT/B/M/k
+#  - NNN trillion/billion/million with or without commas
+#  - NNN% / NNN percent
+_KEY_TERM_PATTERNS = [
+    re.compile(
+        r'\$\s*[\d,]+(?:\.\d+)?\s*(?:trillion|billion|million|thousand|[TBMk])?\b',
+        re.IGNORECASE,
+    ),
+    re.compile(
+        r'\b\d+(?:,\d{3})*(?:\.\d+)?\s*(?:trillion|billion|million|thousand|percent)\b',
+        re.IGNORECASE,
+    ),
+    re.compile(r'\b\d+(?:\.\d+)?\s*%', re.IGNORECASE),
+]
+
+
+def _highlight_key_terms(text):
+    """Wrap currency + big-number phrases in ASS inline color tags (gold)."""
+    out = text
+    for pat in _KEY_TERM_PATTERNS:
+        out = pat.sub(
+            lambda m: (
+                "{\\c" + _PREMIUM_HIGHLIGHT_COLOR + "}" + m.group(0)
+                + "{\\c" + _PREMIUM_RESET_COLOR + "}"
+            ),
+            out,
+        )
+    return out
+
+
+def _chunk_premium(text):
+    """Split text into chunks of ~2 words for word-by-word reveal.
+    Short words (<=3 chars) pair with next word; long words stand alone
+    to avoid compound blocks like "bondholders consequences" feeling dense."""
+    words = text.split()
+    if len(words) <= 2:
+        return [" ".join(words)] if words else []
+    chunks = []
+    i = 0
+    while i < len(words):
+        w = words[i]
+        if len(w) <= 3 and i + 1 < len(words):
+            chunks.append(f"{w} {words[i+1]}")
+            i += 2
+        elif i + 1 < len(words) and len(w) + len(words[i+1]) <= 12:
+            chunks.append(f"{w} {words[i+1]}")
+            i += 2
+        else:
+            chunks.append(w)
+            i += 1
+    return chunks
 
 
 def _parse_srt_entries(srt_path):
@@ -2267,10 +2343,16 @@ def _sec_to_ass_time(s):
 
 def _srt_subset_to_ass(srt_entries, t_start, t_end, ass_path, style_name="kinetic"):
     """Filter SRT entries to [t_start, t_end], shift to 0-based, write ASS.
-    Returns number of caption events written. 0 if no overlap."""
-    style = _SHORT_CAPTION_STYLES.get(style_name, _SHORT_CAPTION_STYLES["kinetic"])
+    Returns number of caption events written. 0 if no overlap.
 
-    # Filter + shift
+    Premium mode (style.premium_reveal=True): splits each cue into ~2-word
+    chunks, each displayed sequentially within the cue's time window. Currency
+    + big-number phrases ('$39 trillion', '900 billion', '15%') get inline
+    gold color tag. Mimics Hormozi/Mr Beast caption style for short-form."""
+    style = _SHORT_CAPTION_STYLES.get(style_name, _SHORT_CAPTION_STYLES["kinetic"])
+    premium_reveal = style.get("premium_reveal", False)
+
+    # Filter + shift + (optionally) chunk into 2-word groups
     events = []
     for e in srt_entries:
         # Skip if completely outside window
@@ -2281,9 +2363,28 @@ def _srt_subset_to_ass(srt_entries, t_start, t_end, ass_path, style_name="kineti
         eend = min(e["end"], t_end) - t_start
         if eend - s < 0.1:
             continue
-        # ASS doesn't like newlines in events — join with \N escape
+        # ASS doesn't like newlines/braces in events — sanitize
         text = e["text"].replace("\n", " ").replace("{", "(").replace("}", ")")
-        events.append((s, eend, text))
+
+        if premium_reveal:
+            chunks = _chunk_premium(text)
+            n = len(chunks)
+            if n == 0:
+                continue
+            dur = eend - s
+            per = dur / n
+            for k, chunk in enumerate(chunks):
+                cs = s + k * per
+                ce = s + (k + 1) * per
+                # Snap last chunk's end to eend to avoid float drift
+                if k == n - 1:
+                    ce = eend
+                # Highlight currency/big-number phrases in gold
+                highlighted = _highlight_key_terms(chunk)
+                # Subtle fade-in 60ms, no fade-out (next chunk cuts in crisp)
+                events.append((cs, ce, "{\\fad(60,0)}" + highlighted))
+        else:
+            events.append((s, eend, text))
 
     # ASS header + style block. PlayResX/Y should match the output (1080x1920).
     header = [
@@ -2398,21 +2499,40 @@ def _render_short(job_input):
             ass_rel = os.path.basename(ass_path)
             vf = f"{vf},subtitles='{ass_rel}'"
 
-        # 4. Run ffmpeg: trim + crop + scale + optional captions + audio fade-out
-        # Fade out last 500ms to mask trailing TTS audio from the next cue
-        # (timestamp_end = SRT cue end, but TTS is continuous — hard trim
-        # leaks bleed-in of next phrase). 500ms is conservative: ensures
-        # cross-cue bleed is fully masked even when next cue starts immediately.
-        FADE_OUT_SEC = 0.5
-        fade_start = max(0.0, duration - FADE_OUT_SEC)
-        af = f"afade=t=out:st={fade_start:.3f}:d={FADE_OUT_SEC:.3f}"
+        # 4. Run ffmpeg: trim + crop + scale + optional captions + audio chain
+        #
+        # Duration strategy (fix 2026-04-21 v3):
+        #   timestamp_end = SRT cue end. TTS word tail-off finishes ~100-300ms
+        #   AFTER the cue's declared end. Previous v1 used hard trim at t_end:
+        #     - captured bleed-in of next phrase ("infoproduct" leaking in)
+        #   v2 masked with 500ms afade from t_end → cut last 2-3 words of
+        #   the actual sentence because the fade started before word ended.
+        #   v3: EXTEND render by +0.8s to capture full word tail-off, fade
+        #   only the last 0.4s. Word finishes clean in the first ~400ms of
+        #   extension, fade curtain masks any next-cue bleed in the final.
+        TAIL_EXTENSION_SEC = 0.8
+        FADE_OUT_SEC = 0.4
+        effective_duration = duration + TAIL_EXTENSION_SEC
+        fade_start = max(0.0, effective_duration - FADE_OUT_SEC)
+
+        # Audio chain (premium-B, minus added music — long-form already has it):
+        #   - highpass f=80Hz: removes sub-bass rumble inaudible on phones
+        #     but eats dynamic headroom
+        #   - equalizer +1.5dB at 3500Hz Q=1: subtle presence boost for voice
+        #     intelligibility on mobile speakers / earbuds
+        #   - afade: tail curtain (see above)
+        af = (
+            "highpass=f=80,"
+            "equalizer=f=3500:width_type=q:width=1:g=1.5,"
+            f"afade=t=out:st={fade_start:.3f}:d={FADE_OUT_SEC:.3f}"
+        )
 
         local_out = os.path.join(work_dir, f"{short_id}.mp4")
         cmd = [
             "ffmpeg", "-y",
             "-ss", f"{t_start:.3f}",
             "-i", local_final,
-            "-t", f"{duration:.3f}",
+            "-t", f"{effective_duration:.3f}",
             "-vf", vf,
             "-af", af,
             *NVENC_HQ_ARGS,
