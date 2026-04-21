@@ -2149,15 +2149,18 @@ _SHORT_CAPTION_STYLES = {
     # This is the default style emitted by ytf-shorts (caption_style=kinetic_default).
     "kinetic_default": {
         "font": "Bebas Neue",
-        "fontsize": 96,
+        "fontsize": 130,  # v4: up from 96 — target 5-6% of 1920px vertical for
+                          # Mr Beast/Hormozi parity (agent review: 96pt was only 3-4%)
         "primary": "&H00FFFFFF",   # white (BGR)
         "outline_color": "&H00000000",  # black
         "back_color": "&H80000000",  # 50% black shadow
-        "outline": 6,
-        "shadow": 3,
+        "outline": 8,  # v4: up from 6 — outline must scale with fontsize to
+                       # survive compression + preserve legibility on busy bg
+        "shadow": 4,  # v4: up from 3
         "bold": 1,
         "alignment": 2,  # bottom-center
-        "margin_v": 180,
+        "margin_v": 200,  # v4: up from 180 — bigger font pushes baseline up;
+                          # keeps bottom safe-zone clear of YT UI overlay
         "premium_reveal": True,
     },
     "kinetic": {  # legacy — phrase-long, smaller
