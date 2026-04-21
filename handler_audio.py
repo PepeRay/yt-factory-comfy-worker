@@ -17,6 +17,20 @@ import glob as glob_module
 import runpod
 import websocket
 
+# Python Whisper direct (B' refactor 2026-04-21): voice-srt jobs bypass
+# ComfyUI entirely and run Whisper in-process to emit word-level timestamps
+# alongside segment-level (superset JSON). Enables perfect per-word caption
+# sync in downstream short-form render (handler_video.py v5). Lazy-loaded
+# to keep handler import time fast — model loads on first voice-srt job.
+try:
+    import whisper as _whisper_lib
+    _WHISPER_AVAILABLE = True
+except ImportError:
+    _whisper_lib = None
+    _WHISPER_AVAILABLE = False
+
+_WHISPER_MODEL_CACHE = {}  # keyed by model name (e.g., "large-v3")
+
 # R2 storage (Cloudflare) — enabled when env vars are set
 try:
     import r2_helper
@@ -409,6 +423,137 @@ def run_compose(channel, content_id, platform, compose_config):
         )
 
 
+# ── Python Whisper direct (B' refactor) ────────────────────
+
+def _get_whisper_model(model_name="large-v3"):
+    """Lazy-load and cache a Whisper model. Single load per worker lifetime."""
+    if not _WHISPER_AVAILABLE:
+        raise RuntimeError("openai-whisper library not available in this worker")
+    if model_name not in _WHISPER_MODEL_CACHE:
+        print(f"[INFO] Whisper: loading {model_name} (first use on this worker)")
+        t0 = time.time()
+        _WHISPER_MODEL_CACHE[model_name] = _whisper_lib.load_model(model_name)
+        print(f"[INFO] Whisper: {model_name} loaded in {time.time()-t0:.1f}s")
+    return _WHISPER_MODEL_CACHE[model_name]
+
+
+_WHISPER_LANG_MAP = {
+    "english": "en", "spanish": "es", "french": "fr", "german": "de",
+    "portuguese": "pt", "italian": "it", "dutch": "nl", "polish": "pl",
+}
+
+
+def _run_python_whisper_srt(workflow, dest, prefix, index=None):
+    """B' refactor: run Whisper directly (bypassing ComfyUI) for voice-srt.
+
+    Reads cfg from the incoming workflow payload (ComfyUI-shaped for backward
+    compat) and emits a superset JSON per segment:
+        [{value, start, end, words: [{word, start, end}, ...]}, ...]
+
+    Word-level data is what handler_video.py v5 uses for perfect per-word
+    reveal sync in short-form captions. Segment-level fields are preserved
+    so the legacy n8n Extract SRT Content node (converts JSON → standard SRT
+    for Drive) keeps working without modification.
+
+    Returns a results list in the same shape `collect_and_move` produces so
+    the rest of the handler flow (R2 upload, cost tracking, response) reuses
+    existing code paths without branching."""
+    model_name = "large-v3"
+    language = "en"
+    initial_prompt = None
+    audio_path = None
+    for nid, node in workflow.items():
+        if not isinstance(node, dict):
+            continue
+        cls = node.get("class_type")
+        if cls == "Apply Whisper":
+            inputs = node.get("inputs", {}) or {}
+            model_name = inputs.get("model", model_name) or model_name
+            language = inputs.get("language", language) or language
+            initial_prompt = inputs.get("prompt") or None
+        elif cls == "VHS_LoadAudio":
+            audio_path = (node.get("inputs", {}) or {}).get("audio_file")
+
+    if not audio_path:
+        raise RuntimeError("voice-srt workflow has no VHS_LoadAudio.audio_file")
+    if not os.path.exists(audio_path):
+        raise RuntimeError(f"voice-srt audio not found locally: {audio_path}")
+
+    # Normalize language name → ISO code (Whisper accepts both but prefers code).
+    lang_code = _WHISPER_LANG_MAP.get(str(language).lower().strip(), language)
+
+    model = _get_whisper_model(model_name)
+
+    # Anti-hallucination params (lesson #18, already patched at library level
+    # but passing explicitly here in case future Dockerfile rebuilds drop it).
+    kwargs = {
+        "word_timestamps": True,
+        "condition_on_previous_text": False,
+        "temperature": 0,
+        "no_speech_threshold": 0.4,
+        "hallucination_silence_threshold": 2.0,
+        "language": lang_code,
+    }
+    if initial_prompt:
+        kwargs["initial_prompt"] = initial_prompt
+
+    print(f"[INFO] voice-srt (python whisper): transcribing {audio_path} "
+          f"model={model_name} lang={lang_code} prompt={bool(initial_prompt)}")
+    t0 = time.time()
+    result = model.transcribe(audio_path, **kwargs)
+    elapsed = time.time() - t0
+
+    # Build superset JSON [{value, start, end, words}]
+    out_segments = []
+    total_words = 0
+    for seg in result.get("segments", []) or []:
+        entry = {
+            "value": (seg.get("text") or "").strip(),
+            "start": round(float(seg.get("start") or 0.0), 3),
+            "end": round(float(seg.get("end") or 0.0), 3),
+        }
+        seg_words = seg.get("words") or []
+        if seg_words:
+            wl = []
+            for w in seg_words:
+                wtxt = (w.get("word") or "").strip()
+                if not wtxt:
+                    continue
+                wl.append({
+                    "word": wtxt,
+                    "start": round(float(w.get("start") or 0.0), 3),
+                    "end": round(float(w.get("end") or 0.0), 3),
+                })
+            if wl:
+                entry["words"] = wl
+                total_words += len(wl)
+        if entry["value"]:
+            out_segments.append(entry)
+
+    print(f"[INFO] voice-srt: whisper done in {elapsed:.1f}s — "
+          f"{len(out_segments)} segments, {total_words} word timings")
+
+    # Write to dest/{prefix}_{index:03d}.txt matching ComfyUI naming so the
+    # downstream n8n `Extract SRT Content` + R2 upload paths read the same file.
+    os.makedirs(dest, exist_ok=True)
+    if index is not None:
+        filename = f"{prefix}_{int(index):03d}.txt"
+    else:
+        filename = f"{prefix}.txt"
+    dest_path = os.path.join(dest, filename)
+    content_str = json.dumps(out_segments, ensure_ascii=False)
+    with open(dest_path, "w", encoding="utf-8") as f:
+        f.write(content_str)
+
+    return [{
+        "filename": filename,
+        "path": dest_path,
+        "node_id": "python_whisper",
+        "content": content_str,
+        "size_mb": round(os.path.getsize(dest_path) / 1024 / 1024, 3),
+    }]
+
+
 # ── Main Handler ────────────────────────────────────────────
 
 _INPUTS_DOWNLOADED = False
@@ -637,34 +782,49 @@ def handler(job):
         except Exception as e:
             return {"error": f"voice-srt audio R2 pre-fetch failed: {e}"}
 
-    try:
-        wait_for_comfyui()
-    except RuntimeError as e:
-        return {"error": str(e)}
+    # B' refactor (2026-04-21): voice-srt bypasses ComfyUI entirely and runs
+    # Python Whisper direct to emit word-level timestamps. Output format is
+    # a superset of the old segment-level JSON, so downstream n8n Extract SRT
+    # Content + R2 upload + handler_video consumers keep working unchanged.
+    # Benefits: single Whisper pass (vs ComfyUI + python merge), half the
+    # VRAM, word-level sync for shorts captions in v5 render handler.
+    if job_type == "voice-srt":
+        try:
+            results = _run_python_whisper_srt(workflow, dest, prefix, index=index)
+        except Exception as e:
+            return {"error": f"voice-srt (python whisper) failed: {e}"}
+        # Skip ComfyUI path entirely — jump to R2 upload + response below.
+        # Use a sentinel to signal the post-ComfyUI code path already has results.
+        prompt_id = "python_whisper_no_comfyui"
+    else:
+        try:
+            wait_for_comfyui()
+        except RuntimeError as e:
+            return {"error": str(e)}
 
-    client_id = str(uuid.uuid4())
-    ws_url = f"ws://{COMFY_HOST}/ws?clientId={client_id}"
-    try:
-        ws = websocket.WebSocket()
-        ws.settimeout(COMFY_EXECUTION_TIMEOUT)
-        ws.connect(ws_url)
-    except Exception as e:
-        return {"error": f"Failed to connect websocket: {str(e)}"}
+        client_id = str(uuid.uuid4())
+        ws_url = f"ws://{COMFY_HOST}/ws?clientId={client_id}"
+        try:
+            ws = websocket.WebSocket()
+            ws.settimeout(COMFY_EXECUTION_TIMEOUT)
+            ws.connect(ws_url)
+        except Exception as e:
+            return {"error": f"Failed to connect websocket: {str(e)}"}
 
-    try:
-        prompt_id = queue_prompt(workflow, client_id)
-    except Exception as e:
-        ws.close()
-        return {"error": f"Failed to queue prompt: {str(e)}"}
+        try:
+            prompt_id = queue_prompt(workflow, client_id)
+        except Exception as e:
+            ws.close()
+            return {"error": f"Failed to queue prompt: {str(e)}"}
 
-    try:
-        wait_for_completion(ws, prompt_id)
-    except RuntimeError as e:
-        return {"error": f"Execution failed: {str(e)}"}
-    finally:
-        ws.close()
+        try:
+            wait_for_completion(ws, prompt_id)
+        except RuntimeError as e:
+            return {"error": f"Execution failed: {str(e)}"}
+        finally:
+            ws.close()
 
-    results = collect_and_move(prompt_id, dest, prefix, index=index)
+        results = collect_and_move(prompt_id, dest, prefix, index=index)
 
     # Duration QA (2026-04-15, lesson #34 Nivel 3 safety net):
     # After TTS generation, verify each chunk's actual duration matches the
