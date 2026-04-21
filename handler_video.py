@@ -2171,10 +2171,43 @@ _SHORT_CAPTION_STYLES = {
 
 
 def _parse_srt_entries(srt_path):
-    """Parse an .srt file into list of dicts: {index, start, end, text}.
+    """Parse an .srt/.txt file into list of dicts: {index, start, end, text}.
+    Accepts two formats:
+      (a) Standard SRT blocks with 'HH:MM:SS,mmm --> HH:MM:SS,mmm' timings.
+      (b) JSON array: [{"value": "text", "start": float_sec, "end": float_sec}, ...]
+          (format written by n8n Audio Pipeline to R2 .txt file)
     Timestamps in seconds. Tolerant to blank lines and CRLF/LF."""
     with open(srt_path, "r", encoding="utf-8") as f:
         raw = f.read().replace("\r\n", "\n").replace("\r", "\n")
+
+    # Try JSON format first (format b)
+    stripped = raw.lstrip()
+    if stripped.startswith("["):
+        try:
+            data = json.loads(stripped)
+            if isinstance(data, list) and data and isinstance(data[0], dict):
+                entries = []
+                for i, item in enumerate(data):
+                    text = (item.get("value") or item.get("text") or "").strip()
+                    if not text:
+                        continue
+                    try:
+                        start = float(item["start"])
+                        end = float(item["end"])
+                    except (KeyError, TypeError, ValueError):
+                        continue
+                    entries.append({
+                        "index": i + 1,
+                        "start": start,
+                        "end": end,
+                        "text": text,
+                    })
+                if entries:
+                    return entries
+        except (json.JSONDecodeError, ValueError):
+            pass  # fall through to SRT parsing
+
+    # Standard SRT blocks (format a)
     entries = []
     blocks = [b.strip() for b in raw.split("\n\n") if b.strip()]
     for block in blocks:
@@ -2365,7 +2398,15 @@ def _render_short(job_input):
             ass_rel = os.path.basename(ass_path)
             vf = f"{vf},subtitles='{ass_rel}'"
 
-        # 4. Run ffmpeg: trim + crop + scale + optional captions
+        # 4. Run ffmpeg: trim + crop + scale + optional captions + audio fade-out
+        # Fade out last 500ms to mask trailing TTS audio from the next cue
+        # (timestamp_end = SRT cue end, but TTS is continuous — hard trim
+        # leaks bleed-in of next phrase). 500ms is conservative: ensures
+        # cross-cue bleed is fully masked even when next cue starts immediately.
+        FADE_OUT_SEC = 0.5
+        fade_start = max(0.0, duration - FADE_OUT_SEC)
+        af = f"afade=t=out:st={fade_start:.3f}:d={FADE_OUT_SEC:.3f}"
+
         local_out = os.path.join(work_dir, f"{short_id}.mp4")
         cmd = [
             "ffmpeg", "-y",
@@ -2373,6 +2414,7 @@ def _render_short(job_input):
             "-i", local_final,
             "-t", f"{duration:.3f}",
             "-vf", vf,
+            "-af", af,
             *NVENC_HQ_ARGS,
             "-c:a", "aac", "-b:a", "192k",
             "-movflags", "+faststart",
