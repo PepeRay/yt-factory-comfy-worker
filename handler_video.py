@@ -2149,18 +2149,18 @@ _SHORT_CAPTION_STYLES = {
     # This is the default style emitted by ytf-shorts (caption_style=kinetic_default).
     "kinetic_default": {
         "font": "Bebas Neue",
-        "fontsize": 130,  # v4: up from 96 — target 5-6% of 1920px vertical for
-                          # Mr Beast/Hormozi parity (agent review: 96pt was only 3-4%)
+        "fontsize": 130,
         "primary": "&H00FFFFFF",   # white (BGR)
         "outline_color": "&H00000000",  # black
         "back_color": "&H80000000",  # 50% black shadow
-        "outline": 8,  # v4: up from 6 — outline must scale with fontsize to
-                       # survive compression + preserve legibility on busy bg
-        "shadow": 4,  # v4: up from 3
+        "outline": 8,
+        "shadow": 4,
         "bold": 1,
         "alignment": 2,  # bottom-center
-        "margin_v": 200,  # v4: up from 180 — bigger font pushes baseline up;
-                          # keeps bottom safe-zone clear of YT UI overlay
+        "margin_v": 240,  # v5: up from 200 — Reels like-button lives ~170px
+                          # from bottom; 240 keeps caption clear in all apps
+        "spacing": -2,  # v5: tighten tracking (Bebas default has wide kerning
+                        # on commas+numbers — e.g., "$39 TRILLION" gap)
         "premium_reveal": True,
     },
     "kinetic": {  # legacy — phrase-long, smaller
@@ -2194,6 +2194,10 @@ _SHORT_CAPTION_STYLES = {
 # BGR format; RGB #FFD700 -> BGR &H00D7FF&.
 _PREMIUM_HIGHLIGHT_COLOR = "&H0000D7FF&"
 _PREMIUM_RESET_COLOR = "&H00FFFFFF&"
+# v5: darker gold for drop-shadow glow behind highlighted words.
+# RGB #8B6508 (dark amber) -> BGR &H0008658B&. Gives subtle halo without
+# breaking legibility on dark backgrounds.
+_PREMIUM_HIGHLIGHT_SHADOW = "&H0008658B&"
 
 # Patterns that deserve gold highlight treatment:
 #  - $NNN, $NNN.NN, $NNN trillion/billion/million/thousand, $NNNT/B/M/k
@@ -2213,13 +2217,21 @@ _KEY_TERM_PATTERNS = [
 
 
 def _highlight_key_terms(text):
-    """Wrap currency + big-number phrases in ASS inline color tags (gold)."""
+    """Wrap currency + big-number phrases in ASS inline color tags (gold).
+    v5: add colored drop-shadow under highlight for Hormozi-style glow effect.
+    \\3c = outline color, \\4c = back/shadow color (BGR). Darker gold behind
+    light gold gives subtle halo without breaking legibility."""
     out = text
     for pat in _KEY_TERM_PATTERNS:
         out = pat.sub(
             lambda m: (
-                "{\\c" + _PREMIUM_HIGHLIGHT_COLOR + "}" + m.group(0)
-                + "{\\c" + _PREMIUM_RESET_COLOR + "}"
+                # Push: gold primary + darker-gold back shadow
+                "{\\c" + _PREMIUM_HIGHLIGHT_COLOR
+                + "\\4c" + _PREMIUM_HIGHLIGHT_SHADOW + "}"
+                + m.group(0)
+                # Pop: restore white primary + default shadow color
+                + "{\\c" + _PREMIUM_RESET_COLOR
+                + "\\4c&H80000000&}"
             ),
             out,
         )
@@ -2249,6 +2261,33 @@ def _chunk_premium(text):
     return chunks
 
 
+def _pack_words_to_chunks(words, max_words=2):
+    """v5: pack word-level entries ({word,start,end}) into 1-2 word chunks
+    for word-by-word reveal with exact spoken timing.
+    Each chunk's start = first word's start, end = last word's end.
+    Short words (<=3 chars) pair with next word; long words stand alone
+    to avoid dense compound chunks. Returns list of (start, end, text)."""
+    groups = []
+    i = 0
+    n = len(words)
+    while i < n:
+        w = words[i]
+        wt = w["word"]
+        if i + 1 < n and len(wt) <= 3 and max_words >= 2:
+            nxt = words[i + 1]
+            groups.append((w["start"], nxt["end"], f"{wt} {nxt['word']}"))
+            i += 2
+        elif (i + 1 < n and max_words >= 2
+              and len(wt) + len(words[i + 1]["word"]) <= 12):
+            nxt = words[i + 1]
+            groups.append((w["start"], nxt["end"], f"{wt} {nxt['word']}"))
+            i += 2
+        else:
+            groups.append((w["start"], w["end"], wt))
+            i += 1
+    return groups
+
+
 def _parse_srt_entries(srt_path):
     """Parse an .srt/.txt file into list of dicts: {index, start, end, text}.
     Accepts two formats:
@@ -2275,12 +2314,33 @@ def _parse_srt_entries(srt_path):
                         end = float(item["end"])
                     except (KeyError, TypeError, ValueError):
                         continue
-                    entries.append({
+                    entry = {
                         "index": i + 1,
                         "start": start,
                         "end": end,
                         "text": text,
-                    })
+                    }
+                    # Preserve word-level timings if present (Whisper
+                    # word_timestamps=True output). Enables exact per-word
+                    # reveal sync in premium caption mode.
+                    words_raw = item.get("words")
+                    if isinstance(words_raw, list) and words_raw:
+                        words = []
+                        for w in words_raw:
+                            try:
+                                wt = (w.get("word") or w.get("text") or "").strip()
+                                if not wt:
+                                    continue
+                                words.append({
+                                    "word": wt,
+                                    "start": float(w["start"]),
+                                    "end": float(w["end"]),
+                                })
+                            except (KeyError, TypeError, ValueError):
+                                continue
+                        if words:
+                            entry["words"] = words
+                    entries.append(entry)
                 if entries:
                     return entries
         except (json.JSONDecodeError, ValueError):
@@ -2370,22 +2430,38 @@ def _srt_subset_to_ass(srt_entries, t_start, t_end, ass_path, style_name="kineti
         text = e["text"].replace("\n", " ").replace("{", "(").replace("}", ")")
 
         if premium_reveal:
-            chunks = _chunk_premium(text)
-            n = len(chunks)
-            if n == 0:
-                continue
-            dur = eend - s
-            per = dur / n
-            for k, chunk in enumerate(chunks):
-                cs = s + k * per
-                ce = s + (k + 1) * per
-                # Snap last chunk's end to eend to avoid float drift
-                if k == n - 1:
-                    ce = eend
-                # Highlight currency/big-number phrases in gold
-                highlighted = _highlight_key_terms(chunk)
-                # Subtle fade-in 60ms, no fade-out (next chunk cuts in crisp)
-                events.append((cs, ce, "{\\fad(60,0)}" + highlighted))
+            words = e.get("words")
+            if words:
+                # v5: word-level Whisper timings → emit chunks of 1-2 words
+                # bound by actual spoken start/end. Eliminates uniform-chunk
+                # desync perception Ray flagged post-v4.
+                word_groups = _pack_words_to_chunks(words, max_words=2)
+                for cs_raw, ce_raw, chunk_text in word_groups:
+                    # Clip to cue window [t_start, t_end], shift to 0-based
+                    if ce_raw <= t_start or cs_raw >= t_end:
+                        continue
+                    cs = max(cs_raw, t_start) - t_start
+                    ce = min(ce_raw, t_end) - t_start
+                    if ce - cs < 0.05:
+                        continue
+                    chunk_clean = chunk_text.replace("{", "(").replace("}", ")")
+                    highlighted = _highlight_key_terms(chunk_clean)
+                    events.append((cs, ce, "{\\fad(50,0)}" + highlighted))
+            else:
+                # Fallback: no word-level timings → uniform chunking (v3/v4)
+                chunks = _chunk_premium(text)
+                n = len(chunks)
+                if n == 0:
+                    continue
+                dur = eend - s
+                per = dur / n
+                for k, chunk in enumerate(chunks):
+                    cs = s + k * per
+                    ce = s + (k + 1) * per
+                    if k == n - 1:
+                        ce = eend
+                    highlighted = _highlight_key_terms(chunk)
+                    events.append((cs, ce, "{\\fad(60,0)}" + highlighted))
         else:
             events.append((s, eend, text))
 
@@ -2405,7 +2481,7 @@ def _srt_subset_to_ass(srt_entries, t_start, t_end, ass_path, style_name="kineti
         "Alignment, MarginL, MarginR, MarginV, Encoding",
         f"Style: Default,{style['font']},{style['fontsize']},"
         f"{style['primary']},&H00FFFFFF,{style['outline_color']},{style['back_color']},"
-        f"{style['bold']},0,0,0,100,100,0,0,1,{style['outline']},{style['shadow']},"
+        f"{style['bold']},0,0,0,100,100,{style.get('spacing', 0)},0,1,{style['outline']},{style['shadow']},"
         f"{style['alignment']},80,80,{style['margin_v']},1",
         "",
         "[Events]",
