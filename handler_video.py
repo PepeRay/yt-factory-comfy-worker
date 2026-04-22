@@ -114,6 +114,99 @@ _NVENC_FAILURE_MARKERS = (
 )
 
 
+# ── SFX overlay support (V1 2026-04-21) ──────────────────────────────────────
+# Assets pending V1.5 upload to R2. Code handles their eventual presence via
+# fail-open pattern (skip with WARN if file missing, don't fail compose).
+# Supported types: whoosh (icon_callout entry), tick (icon_flow arrow connect),
+# drone (icon_callout hero-card loop). Mix levels tuned for -16 LUFS master.
+SFX_CATALOG = {
+    "whoosh": {
+        "r2_key": "dominion/visual-assets/sfx/whoosh-doc-low.mp3",
+        "mix_db": -15,
+    },
+    "tick": {
+        "r2_key": "dominion/visual-assets/sfx/tick-mechanical.mp3",
+        "mix_db": -18,
+    },
+    "drone": {
+        "r2_key": "dominion/visual-assets/sfx/drone-sub-editorial.mp3",
+        "mix_db": -22,
+    },
+}
+
+
+def parse_sfx_cues(scene):
+    """Parse sfx_cues array from scene manifest, resolve to SFX metadata.
+
+    Args:
+        scene: Scene dict with optional 'sfx_cues' list of {type, timing_sec}
+
+    Returns:
+        List of dicts: [{type, timing_sec, r2_key, mix_db}, ...]
+
+    Raises:
+        ValueError: if any cue.type is not in SFX_CATALOG
+    """
+    cues = scene.get("sfx_cues", [])
+    result = []
+    for cue in cues:
+        sfx_type = cue["type"]
+        if sfx_type not in SFX_CATALOG:
+            raise ValueError(f"Unknown SFX type: {sfx_type!r}")
+        result.append({
+            "type": sfx_type,
+            "timing_sec": cue["timing_sec"],
+            "r2_key": SFX_CATALOG[sfx_type]["r2_key"],
+            "mix_db": SFX_CATALOG[sfx_type]["mix_db"],
+        })
+    return result
+
+
+def build_ffmpeg_audio_filter(narration_path, music_path, sfx_inputs):
+    """Build FFmpeg filter_complex for mixing narration + music + N SFX.
+
+    Args:
+        narration_path: path to narration FLAC/MP3 (base level 1.0)
+        music_path: path to background music
+        sfx_inputs: list of {path, timing_sec, mix_db}
+
+    Returns:
+        String filter_complex ready for -filter_complex arg.
+        Uses input indices 0=narration, 1=music, 2..N=SFX (caller must
+        pass inputs in that order to ffmpeg -i flags).
+    """
+    parts = []
+
+    # Narration base (input 0)
+    parts.append("[0:a]volume=1.0[narr]")
+
+    # Music (input 1) - fixed 0.30 level per lesson #66 convention
+    parts.append("[1:a]volume=0.30[music]")
+
+    # SFX inputs (2, 3, ...N)
+    sfx_labels = []
+    for i, sfx in enumerate(sfx_inputs, start=2):
+        label = f"sfx{i - 2}"
+        timing_ms = int(sfx["timing_sec"] * 1000)
+        # Convert dB to linear: 10^(db/20), rounded to 4 decimals
+        linear = round(10 ** (sfx["mix_db"] / 20.0), 4)
+        parts.append(
+            f"[{i}:a]volume={linear:.4f},"
+            f"adelay={timing_ms}|{timing_ms}[{label}]"
+        )
+        sfx_labels.append(f"[{label}]")
+
+    # Final amix
+    all_labels = "[narr][music]" + "".join(sfx_labels)
+    total_inputs = 2 + len(sfx_inputs)
+    parts.append(
+        f"{all_labels}amix=inputs={total_inputs}:normalize=0:duration=longest,"
+        f"loudnorm=I=-16:TP=-1.5:LRA=11[aout]"
+    )
+
+    return ";".join(parts)
+
+
 def _swap_nvenc_for_x264(cmd):
     """Return a new cmd list with h264_nvenc args replaced by libx264 equivalents.
     Handles both HQ and NORM presets by detecting the -cq value."""
