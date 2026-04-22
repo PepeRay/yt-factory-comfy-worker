@@ -2039,8 +2039,69 @@ def _compose_scene_manifest_impl(src, dest, content_id, config, channel, platfor
     has_ambient = ambient_concat_path is not None and os.path.isfile(ambient_concat_path)
     has_srt = os.path.exists(srt_path)
 
+    # ── SFX overlay (V1 2026-04-21) — collect cues from all scenes ──────────
+    # Aggregate sfx_cues from every scene in the manifest, download each unique
+    # R2 key once. Fail-open: if a file is missing in R2 (V1.5 assets pending),
+    # log a WARN and skip — never fail the entire compose for a missing SFX.
+    # Scenes without sfx_cues are skipped by parse_sfx_cues() returning [].
+    sfx_inputs = []  # [{path, timing_sec, mix_db, scene_offset_sec}, ...]
+    if R2_ENABLED:
+        # Build a per-scene start-offset map so we can convert scene-relative
+        # timing_sec to absolute timeline position in the final video.
+        scene_offset_map = {}
+        _offset = 0.0
+        for idx, _sc in enumerate(scenes):
+            _sid = _sc["scene_id"]
+            _dur = _sc.get("duration_sec", 5)
+            if idx > 0 and _sc.get("transition_in") in ("dissolve", "fade_black", "fade_white"):
+                _xf = float(_sc.get("transition_duration_sec", 0))
+                _eff = max(0.0, _dur - _xf)
+            else:
+                _eff = _dur
+            scene_offset_map[_sid] = _offset
+            _offset += _eff
+
+        sfx_staging_dir = os.path.join(segments_dir, "_sfx")
+        os.makedirs(sfx_staging_dir, exist_ok=True)
+        _downloaded_r2_keys = {}  # r2_key -> local_path (deduplicate per-key)
+
+        for _sc in scenes:
+            _sid = _sc["scene_id"]
+            _sc_offset = scene_offset_map.get(_sid, 0.0)
+            try:
+                cues = parse_sfx_cues(_sc)
+            except ValueError as e:
+                print(f"WARN: SFX parse error scene {_sid}: {e} — skipping")
+                continue
+            for cue in cues:
+                r2k = cue["r2_key"]
+                if r2k not in _downloaded_r2_keys:
+                    local_name = os.path.basename(r2k)
+                    local_path = os.path.join(sfx_staging_dir, local_name)
+                    try:
+                        r2_helper.download_file(r2k, local_path)
+                        _downloaded_r2_keys[r2k] = local_path
+                        print(f"[SFX] Downloaded {r2k} -> {local_path}")
+                    except Exception as e:
+                        print(f"WARN: SFX file missing in R2 (V1.5 pending): {r2k} — {e}")
+                        _downloaded_r2_keys[r2k] = None  # mark as unavailable
+                local_path = _downloaded_r2_keys[r2k]
+                if local_path is not None:
+                    abs_timing = _sc_offset + cue["timing_sec"]
+                    sfx_inputs.append({
+                        "path": local_path,
+                        "timing_sec": abs_timing,
+                        "mix_db": cue["mix_db"],
+                    })
+
+        if sfx_inputs:
+            print(f"[SFX] {len(sfx_inputs)} cue(s) loaded from {len(_downloaded_r2_keys)} unique file(s)")
+    else:
+        # R2 not enabled in this environment — SFX silently skipped
+        pass
+
     # Build FFmpeg command with dynamic audio mixing
-    # Input indices: 0=video, then narration/music/ambient in order
+    # Input indices: 0=video, then narration/music/ambient/sfx in order
     cmd = ["ffmpeg", "-y", "-i", merged_path]
     input_idx = 1
     narr_idx = music_idx = amb_idx = None
@@ -2058,6 +2119,18 @@ def _compose_scene_manifest_impl(src, dest, content_id, config, channel, platfor
         amb_idx = input_idx
         input_idx += 1
 
+    # Inject SFX inputs after ambient (only when we have narration+music to mix)
+    sfx_input_meta = []  # [{ffmpeg_idx, timing_sec, mix_db}, ...]
+    if sfx_inputs and has_narration and has_music:
+        for sfx in sfx_inputs:
+            cmd += ["-i", sfx["path"]]
+            sfx_input_meta.append({
+                "ffmpeg_idx": input_idx,
+                "timing_sec": sfx["timing_sec"],
+                "mix_db": sfx["mix_db"],
+            })
+            input_idx += 1
+
     # Build audio filter chain
     audio_inputs = []
     filter_parts = []
@@ -2072,6 +2145,17 @@ def _compose_scene_manifest_impl(src, dest, content_id, config, channel, platfor
         # filter_parts.append(f"[{amb_idx}:a]volume=0.08[amb]")
         # audio_inputs.append("[amb]")  # ambient stream not defined, don't reference it
         has_ambient = False
+
+    # Inject SFX filter parts (after narr + music, before amix)
+    for sfx_meta in sfx_input_meta:
+        fidx = sfx_meta["ffmpeg_idx"]
+        timing_ms = int(sfx_meta["timing_sec"] * 1000)
+        linear = round(10 ** (sfx_meta["mix_db"] / 20.0), 4)
+        label = f"sfx{fidx}"
+        filter_parts.append(
+            f"[{fidx}:a]volume={linear:.4f},adelay={timing_ms}|{timing_ms}[{label}]"
+        )
+        audio_inputs.append(f"[{label}]")
 
     srt_filter = f"subtitles={srt_path}:force_style='FontSize=22,PrimaryColour=&H00FFFFFF'" if has_srt else None
 
