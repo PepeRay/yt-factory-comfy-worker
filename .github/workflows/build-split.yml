@@ -124,10 +124,23 @@ jobs:
     outputs:
       image_tag: ${{ steps.meta.outputs.image_tag }}
     steps:
-      # Dockerfile.images is now a thin overlay on top of the -base orphan
-      # (sha256:76bbb76b) which already has models baked in. Build takes
-      # <2 min (just copies 3 handler files over pre-built 33GB base).
-      # No free-disk-space needed — no model downloads, no torch reinstall.
+      # Dockerfile.images is a thin overlay on top of the -base orphan
+      # (sha256:76bbb76b...) which has models baked in (~33GB). Even though
+      # we only add 3 small files on top, buildx still resolves the base's
+      # layers from the registry. The default runner only has ~20GB free,
+      # so we still need free-disk-space (build 155 crashed at runner
+      # startup with "No space left on device").
+      - name: Free disk space on runner
+        uses: jlumbroso/free-disk-space@main
+        with:
+          tool-cache: true
+          android: true
+          dotnet: true
+          haskell: true
+          large-packages: true
+          docker-images: true
+          swap-storage: true
+
       - uses: actions/checkout@v4
 
       - uses: docker/login-action@v3
