@@ -18,7 +18,7 @@
 # iterations are fast and the bigger re-architecture can come later.
 # ============================================================
 
-FROM ghcr.io/peperay/yt-factory-images-base@sha256:76bbb76b07464b6f0d109b0572c6267809a822fd98771a1e4e
+FROM ghcr.io/peperay/yt-factory-images-base@sha256:76bbb76b07464b6f0d109b0572c6267809a822fd98771a1e4e1b0161a14acb95
 
 # Overlay current handler + r2 helper + start script
 # (base image was frozen before commit 5ac4bce added apply_mark_signature;
