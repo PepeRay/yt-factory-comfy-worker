@@ -142,8 +142,24 @@ import spandrel; \
 print(f'torch={torch.__version__}, numpy={numpy.__version__}, transformers={transformers.__version__}'); \
 print('=== Images endpoint environment verified ===')"
 
-# ── Model directories ───────────────────────────────────────
-RUN mkdir -p /comfyui/models/diffusion_models \
+# ── Pre-download cleanup to maximize runner disk ────────────
+# Build 152 died during fp8 wget because runner disk filled up with BuildKit
+# layer snapshots. Free what we can before the big downloads.
+RUN apt-get clean -y \
+    && rm -rf /var/lib/apt/lists/* /var/cache/apt/archives/* \
+    && rm -rf /root/.cache/pip /root/.cache/uv \
+    && echo "=== Pre-model disk cleanup ==="
+
+# ── Model Downloads (baked in for NV-free operation) ────────
+# Combined into ONE RUN to reduce BuildKit layer count and peak disk
+# pressure. Each model is ~dependency of the ComfyUI workflow:
+#   - flux-2-klein-9b-Q8_0.gguf  (~10 GB, public)  → UnetLoaderGGUF
+#   - flux-2-klein-9b-fp8.safetensors (~9.4 GB, gated) → UNETLoader
+#   - flux2-vae.safetensors (~336 MB, public)      → VAELoader
+#   - qwen_3_8b_fp8mixed_abliterated.safetensors (~8.2 GB, public) → CLIPLoader
+# Verify gate at the end (test -s catches empty files from silent failures).
+RUN set -e; \
+    mkdir -p /comfyui/models/diffusion_models \
              /comfyui/models/vae \
              /comfyui/models/clip \
              /comfyui/models/loras \
@@ -152,37 +168,27 @@ RUN mkdir -p /comfyui/models/diffusion_models \
              /comfyui/models/checkpoints \
              /comfyui/models/controlnet \
              /comfyui/models/upscale_models \
-             /comfyui/models/embeddings
-
-# ── Model Downloads (baked in for NV-free operation) ────────
-# Flux 2 Klein GGUF Q8 (~10 GB) — public, UnetLoaderGGUF
-RUN wget -q --show-progress -O /comfyui/models/diffusion_models/flux-2-klein-9b-Q8_0.gguf \
-    "https://huggingface.co/unsloth/FLUX.2-klein-9B-GGUF/resolve/main/flux-2-klein-9b-Q8_0.gguf"
-
-# Flux 2 Klein fp8 (~9.4 GB) — gated, requires HF_TOKEN, UNETLoader
-RUN wget -q --show-progress -O /comfyui/models/diffusion_models/flux-2-klein-9b-fp8.safetensors \
-    --header="Authorization: Bearer ${HF_TOKEN}" \
-    "https://huggingface.co/black-forest-labs/FLUX.2-klein-9b-fp8/resolve/main/flux-2-klein-9b-fp8.safetensors"
-
-# Flux 2 VAE (~336 MB) — public, VAELoader
-RUN wget -q --show-progress -O /comfyui/models/vae/flux2-vae.safetensors \
-    "https://huggingface.co/Comfy-Org/flux2-dev/resolve/main/split_files/vae/flux2-vae.safetensors"
-
-# Qwen 3 8B fp8 abliterated text encoder (~8.2 GB) — public, CLIPLoader
-RUN wget -q --show-progress -O /comfyui/models/clip/qwen_3_8b_fp8mixed_abliterated.safetensors \
-    "https://huggingface.co/edicamargo/qwen_3_8b_fp8mixed_abliterated/resolve/main/qwen_3_8b_fp8mixed_abliterated.safetensors"
-
-# ── Verify core models exist (build-time gate) ──────────────
-# If any model download failed silently, fail the build here — never push
-# an image that will silently fail at runtime with "Value not in list" errors.
-RUN echo "=== Verifying model files ===" && \
-    test -s /comfyui/models/diffusion_models/flux-2-klein-9b-Q8_0.gguf && \
-    test -s /comfyui/models/diffusion_models/flux-2-klein-9b-fp8.safetensors && \
-    test -s /comfyui/models/vae/flux2-vae.safetensors && \
-    test -s /comfyui/models/clip/qwen_3_8b_fp8mixed_abliterated.safetensors && \
-    ls -lh /comfyui/models/diffusion_models/ /comfyui/models/vae/ /comfyui/models/clip/ && \
-    echo "=== All core models verified ===" || \
-    (echo "ERROR: Missing or empty model files!" && exit 1)
+             /comfyui/models/embeddings; \
+    echo "=== [1/4] Downloading flux-2-klein-9b-Q8_0.gguf (~10 GB) ==="; \
+    wget --progress=dot:giga -O /comfyui/models/diffusion_models/flux-2-klein-9b-Q8_0.gguf \
+        "https://huggingface.co/unsloth/FLUX.2-klein-9B-GGUF/resolve/main/flux-2-klein-9b-Q8_0.gguf"; \
+    echo "=== [2/4] Downloading flux-2-klein-9b-fp8.safetensors (~9.4 GB, gated) ==="; \
+    wget --progress=dot:giga -O /comfyui/models/diffusion_models/flux-2-klein-9b-fp8.safetensors \
+        --header="Authorization: Bearer ${HF_TOKEN}" \
+        "https://huggingface.co/black-forest-labs/FLUX.2-klein-9b-fp8/resolve/main/flux-2-klein-9b-fp8.safetensors"; \
+    echo "=== [3/4] Downloading flux2-vae.safetensors (~336 MB) ==="; \
+    wget --progress=dot:giga -O /comfyui/models/vae/flux2-vae.safetensors \
+        "https://huggingface.co/Comfy-Org/flux2-dev/resolve/main/split_files/vae/flux2-vae.safetensors"; \
+    echo "=== [4/4] Downloading qwen_3_8b_fp8mixed_abliterated.safetensors (~8.2 GB) ==="; \
+    wget --progress=dot:giga -O /comfyui/models/clip/qwen_3_8b_fp8mixed_abliterated.safetensors \
+        "https://huggingface.co/edicamargo/qwen_3_8b_fp8mixed_abliterated/resolve/main/qwen_3_8b_fp8mixed_abliterated.safetensors"; \
+    echo "=== Verifying all model files ==="; \
+    test -s /comfyui/models/diffusion_models/flux-2-klein-9b-Q8_0.gguf; \
+    test -s /comfyui/models/diffusion_models/flux-2-klein-9b-fp8.safetensors; \
+    test -s /comfyui/models/vae/flux2-vae.safetensors; \
+    test -s /comfyui/models/clip/qwen_3_8b_fp8mixed_abliterated.safetensors; \
+    ls -lh /comfyui/models/diffusion_models/ /comfyui/models/vae/ /comfyui/models/clip/; \
+    echo "=== All 4 core models verified ==="
 
 # ── Clear HF token (don't bake into final image) ────────────
 ENV HF_TOKEN=
