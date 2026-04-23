@@ -124,24 +124,10 @@ jobs:
     outputs:
       image_tag: ${{ steps.meta.outputs.image_tag }}
     steps:
-      # Image is ~40 GB after bundling models (~28 GB) on top of ~12 GB base.
-      # Default GitHub runner has ~14 GB free. Build 152 died during fp8
-      # wget at 11% (disk pressure, no error msg — classic BuildKit SIGKILL).
-      # Set docker-images=true (frees ~10 GB of preinstalled docker images)
-      # plus everything else. cache-to disabled (gha cache was consuming
-      # ~5 GB more on the runner + cache wouldn't help future builds anyway
-      # since models layer is huge + unique per rebuild).
-      - name: Free disk space on runner
-        uses: jlumbroso/free-disk-space@main
-        with:
-          tool-cache: true
-          android: true
-          dotnet: true
-          haskell: true
-          large-packages: true
-          docker-images: true
-          swap-storage: true
-
+      # Dockerfile.images is now a thin overlay on top of the -base orphan
+      # (sha256:76bbb76b) which already has models baked in. Build takes
+      # <2 min (just copies 3 handler files over pre-built 33GB base).
+      # No free-disk-space needed — no model downloads, no torch reinstall.
       - uses: actions/checkout@v4
 
       - uses: docker/login-action@v3
@@ -157,13 +143,9 @@ jobs:
           context: .
           file: Dockerfile.images
           push: true
-          build-args: |
-            HF_TOKEN=${{ secrets.HF_TOKEN }}
           tags: |
             ${{ env.IMAGE_PREFIX }}-images:latest
             ${{ env.IMAGE_PREFIX }}-images:${{ github.sha }}
-          # No cache-to: 40 GB image + HF downloads don't benefit from gha
-          # cache (each build re-downloads models anyway) and consume disk.
 
       - name: Expose image tag for downstream jobs
         id: meta
