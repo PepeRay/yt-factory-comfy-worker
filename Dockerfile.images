@@ -2,6 +2,11 @@
 # YouTube Factory — Images Endpoint (Flux 2 Klein + LoRAs)
 # Job types: txt-img
 # Optimized: Only image generation nodes from TXT-IMG_API workflow
+#
+# 2026-04-23: Models baked into image (NV-free operation). Previously
+# assumed Network Volume; endpoint actually has networkVolumeId="" so
+# the monolithic image must be self-sufficient. See lesson #48 follow-up
+# in rules/runpod-infrastructure.md.
 # ============================================================
 
 ARG BASE_IMAGE=nvidia/cuda:12.6.3-cudnn-runtime-ubuntu24.04
@@ -9,6 +14,8 @@ ARG BASE_IMAGE=nvidia/cuda:12.6.3-cudnn-runtime-ubuntu24.04
 FROM ${BASE_IMAGE} AS base
 
 ARG COMFYUI_VERSION=0.18.2
+ARG HF_TOKEN
+ENV HF_TOKEN=${HF_TOKEN}
 
 ENV DEBIAN_FRONTEND=noninteractive
 ENV PIP_PREFER_BINARY=1
@@ -51,7 +58,7 @@ RUN grep -v -i -E '^(torch==|torch>=|torch<=|torchvision==|torchvision>=|torchau
     uv pip install -r /tmp/reqs_no_torch.txt && \
     rm /tmp/reqs_no_torch.txt
 
-# ── Model paths: Network Volume ─────────────────────────────
+# ── Model paths config ──────────────────────────────────────
 COPY extra_model_paths.yaml ./
 
 # ── Custom Nodes: IMAGE ONLY ────────────────────────────────
@@ -115,6 +122,51 @@ import matplotlib; \
 import spandrel; \
 print(f'torch={torch.__version__}, numpy={numpy.__version__}, transformers={transformers.__version__}'); \
 print('=== Images endpoint environment verified ===')"
+
+# ── Model directories ───────────────────────────────────────
+RUN mkdir -p /comfyui/models/diffusion_models \
+             /comfyui/models/vae \
+             /comfyui/models/clip \
+             /comfyui/models/loras \
+             /comfyui/models/text_encoders \
+             /comfyui/models/unet \
+             /comfyui/models/checkpoints \
+             /comfyui/models/controlnet \
+             /comfyui/models/upscale_models \
+             /comfyui/models/embeddings
+
+# ── Model Downloads (baked in for NV-free operation) ────────
+# Flux 2 Klein GGUF Q8 (~10 GB) — public, UnetLoaderGGUF
+RUN wget -q --show-progress -O /comfyui/models/diffusion_models/flux-2-klein-9b-Q8_0.gguf \
+    "https://huggingface.co/unsloth/FLUX.2-klein-9B-GGUF/resolve/main/flux-2-klein-9b-Q8_0.gguf"
+
+# Flux 2 Klein fp8 (~9.4 GB) — gated, requires HF_TOKEN, UNETLoader
+RUN wget -q --show-progress -O /comfyui/models/diffusion_models/flux-2-klein-9b-fp8.safetensors \
+    --header="Authorization: Bearer ${HF_TOKEN}" \
+    "https://huggingface.co/black-forest-labs/FLUX.2-klein-9b-fp8/resolve/main/flux-2-klein-9b-fp8.safetensors"
+
+# Flux 2 VAE (~336 MB) — public, VAELoader
+RUN wget -q --show-progress -O /comfyui/models/vae/flux2-vae.safetensors \
+    "https://huggingface.co/Comfy-Org/flux2-dev/resolve/main/split_files/vae/flux2-vae.safetensors"
+
+# Qwen 3 8B fp8 abliterated text encoder (~8.2 GB) — public, CLIPLoader
+RUN wget -q --show-progress -O /comfyui/models/clip/qwen_3_8b_fp8mixed_abliterated.safetensors \
+    "https://huggingface.co/edicamargo/qwen_3_8b_fp8mixed_abliterated/resolve/main/qwen_3_8b_fp8mixed_abliterated.safetensors"
+
+# ── Verify core models exist (build-time gate) ──────────────
+# If any model download failed silently, fail the build here — never push
+# an image that will silently fail at runtime with "Value not in list" errors.
+RUN echo "=== Verifying model files ===" && \
+    test -s /comfyui/models/diffusion_models/flux-2-klein-9b-Q8_0.gguf && \
+    test -s /comfyui/models/diffusion_models/flux-2-klein-9b-fp8.safetensors && \
+    test -s /comfyui/models/vae/flux2-vae.safetensors && \
+    test -s /comfyui/models/clip/qwen_3_8b_fp8mixed_abliterated.safetensors && \
+    ls -lh /comfyui/models/diffusion_models/ /comfyui/models/vae/ /comfyui/models/clip/ && \
+    echo "=== All core models verified ===" || \
+    (echo "ERROR: Missing or empty model files!" && exit 1)
+
+# ── Clear HF token (don't bake into final image) ────────────
+ENV HF_TOKEN=
 
 # ── Handler ──────────────────────────────────────────────────
 RUN uv pip install runpod requests websocket-client boto3

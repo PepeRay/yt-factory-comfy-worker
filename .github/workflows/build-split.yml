@@ -121,7 +121,22 @@ jobs:
     permissions:
       contents: read
       packages: write
+    outputs:
+      image_tag: ${{ steps.meta.outputs.image_tag }}
     steps:
+      # Image is ~40 GB after bundling models (~28 GB) on top of ~12 GB base.
+      # Default GitHub runner has ~14 GB free — need to free space first.
+      - name: Free disk space on runner
+        uses: jlumbroso/free-disk-space@main
+        with:
+          tool-cache: true
+          android: true
+          dotnet: true
+          haskell: true
+          large-packages: true
+          docker-images: false
+          swap-storage: true
+
       - uses: actions/checkout@v4
 
       - uses: docker/login-action@v3
@@ -137,11 +152,18 @@ jobs:
           context: .
           file: Dockerfile.images
           push: true
+          build-args: |
+            HF_TOKEN=${{ secrets.HF_TOKEN }}
           tags: |
             ${{ env.IMAGE_PREFIX }}-images:latest
             ${{ env.IMAGE_PREFIX }}-images:${{ github.sha }}
           cache-from: type=gha,scope=images
           cache-to: type=gha,mode=max,scope=images
+
+      - name: Expose image tag for downstream jobs
+        id: meta
+        run: |
+          echo "image_tag=${{ env.IMAGE_PREFIX }}-images:${{ github.sha }}" >> "$GITHUB_OUTPUT"
 
   build-video:
     needs: changes
@@ -237,7 +259,7 @@ jobs:
             echo "ERROR: Image ${NEW_IMAGE} not found in GHCR (HTTP ${HTTP_CODE})"
             exit 1
           fi
-          echo "✓ Image manifest found in GHCR"
+          echo "Image manifest found in GHCR"
 
           echo "PATCHing RunPod audio template (id=${TEMPLATE_ID})..."
           PATCH_BODY=$(jq -cn --arg img "$NEW_IMAGE" '{imageName: $img}')
@@ -262,10 +284,12 @@ jobs:
 
   update-runpod-images:
     # Auto-updates the RunPod images template (id 7y8167cpbf) when build-images
-    # succeeds. Added 2026-04-19 after the monolithic migration cycle — prior to
-    # that the template pointed to an orphan -base image (lesson #48). Migration
-    # validated with a real thumbnail regen job producing correct output (11s
-    # exec time, text overlay defaults 180pt/12px no-vignette verified).
+    # succeeds. Added 2026-04-19 after the monolithic migration cycle.
+    # 2026-04-23: fixed downstream `outputs.image_tag` on build-images (the
+    # previous version had NEW_IMAGE empty, PATCHing the template with a
+    # broken ref). Also, the monolithic image now bakes models in (see
+    # Dockerfile.images rewrite same date) so PATCHing to the monolithic
+    # SHA is safe — was not before, when it pushed an image missing models.
     # Pins by full commit SHA (40 chars), never :latest.
     needs: build-images
     if: needs.build-images.result == 'success'
@@ -282,6 +306,11 @@ jobs:
 
           if [ -z "${RUNPOD_API_KEY:-}" ]; then
             echo "ERROR: RUNPOD_API_KEY secret is missing"
+            exit 1
+          fi
+
+          if [ -z "${NEW_IMAGE:-}" ]; then
+            echo "ERROR: NEW_IMAGE is empty — build-images.outputs.image_tag not set"
             exit 1
           fi
 
@@ -302,7 +331,7 @@ jobs:
             echo "ERROR: Image ${NEW_IMAGE} not found in GHCR (HTTP ${HTTP_CODE})"
             exit 1
           fi
-          echo "✓ Image manifest found in GHCR"
+          echo "Image manifest found in GHCR"
 
           echo "PATCHing RunPod images template (id=${TEMPLATE_ID})..."
           PATCH_BODY=$(jq -cn --arg img "$NEW_IMAGE" '{imageName: $img}')
@@ -367,7 +396,7 @@ jobs:
             echo "ERROR: Image ${NEW_IMAGE} not found in GHCR (HTTP ${HTTP_CODE})"
             exit 1
           fi
-          echo "✓ Image manifest found in GHCR"
+          echo "Image manifest found in GHCR"
 
           echo "PATCHing RunPod video template (id=${TEMPLATE_ID})..."
           PATCH_BODY=$(jq -cn --arg img "$NEW_IMAGE" '{imageName: $img}')
