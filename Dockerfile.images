@@ -48,9 +48,24 @@ ENV PATH="/opt/venv/bin:${PATH}"
 # ── ComfyUI Core ────────────────────────────────────────────
 RUN uv pip install comfy-cli pip setuptools wheel
 
+# Pin torch BEFORE comfy install. PyTorch 2.10.0+ (released 2026-04-23)
+# adds nvidia-nvtx-cu12==12.6.77 constraint that breaks pip's resolver
+# against ComfyUI 0.18.2's ecosystem. 2.9.1 is the last version that
+# resolves cleanly. Pre-installing it means comfy-cli sees torch already
+# satisfied and doesn't try to upgrade.
+RUN uv pip install \
+    torch==2.9.1+cu126 \
+    torchvision==0.24.1+cu126 \
+    torchaudio==2.9.1+cu126 \
+    --index-url https://download.pytorch.org/whl/cu126
+
 RUN /usr/bin/yes | comfy --workspace /comfyui install --version "${COMFYUI_VERSION}" --nvidia
 
-RUN uv pip install --force-reinstall torch torchvision torchaudio --index-url https://download.pytorch.org/whl/cu126
+RUN uv pip install --force-reinstall \
+    torch==2.9.1+cu126 \
+    torchvision==0.24.1+cu126 \
+    torchaudio==2.9.1+cu126 \
+    --index-url https://download.pytorch.org/whl/cu126
 
 WORKDIR /comfyui
 
@@ -86,8 +101,12 @@ RUN uv pip install \
     && echo "=== Image deps installed ==="
 
 # ── Restore critical packages ───────────────────────────────
+# Keep the same 2.9.1 pin here (pre-2.10 regression, see ComfyUI Core note above).
 RUN uv pip install --force-reinstall \
-    torch torchvision torchaudio --index-url https://download.pytorch.org/whl/cu126 \
+    torch==2.9.1+cu126 \
+    torchvision==0.24.1+cu126 \
+    torchaudio==2.9.1+cu126 \
+    --index-url https://download.pytorch.org/whl/cu126 \
     && uv pip install --force-reinstall numpy \
     && echo "=== PyTorch + numpy restored ==="
 
