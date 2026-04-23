@@ -114,95 +114,177 @@ _NVENC_FAILURE_MARKERS = (
 )
 
 
-# ── SFX overlay support (V1 2026-04-21) ──────────────────────────────────────
-# Assets pending V1.5 upload to R2. Code handles their eventual presence via
-# fail-open pattern (skip with WARN if file missing, don't fail compose).
-# Supported types: whoosh (icon_callout entry), tick (icon_flow arrow connect),
-# drone (icon_callout hero-card loop). Mix levels tuned for -16 LUFS master.
-SFX_CATALOG = {
-    "whoosh": {
-        "r2_key": "dominion/visual-assets/sfx/whoosh-doc-low.mp3",
-        "mix_db": -15,
-    },
-    "tick": {
-        "r2_key": "dominion/visual-assets/sfx/tick-mechanical.mp3",
-        "mix_db": -18,
-    },
-    "drone": {
-        "r2_key": "dominion/visual-assets/sfx/drone-sub-editorial.mp3",
-        "mix_db": -22,
-    },
-}
+# ── SFX overlay support (V2 2026-04-22) ──────────────────────────────────────
+# V2 schema: scenes declare `sfx_list` (puntuales) and `ambient_bed` (continuous
+# drone) with direct file paths resolved under `{channel}/SFX/` in R2. Replaces
+# the V1 hardcoded 3-type SFX_CATALOG. Full catalog of 42 SFX documented in
+# `{channel}/SFX/README.md` and the director-visual agent.
+#
+# Fail-open pattern preserved: if a file is missing in R2, log WARN and skip
+# that SFX — never fail the entire compose for a missing asset.
+SFX_R2_PREFIX_FMT = "{channel}/SFX/{file}"
 
 
-def parse_sfx_cues(scene):
-    """Parse sfx_cues array from scene manifest, resolve to SFX metadata.
+def parse_sfx_list(scene):
+    """Parse sfx_list array from scene manifest (V2 schema).
 
     Args:
-        scene: Scene dict with optional 'sfx_cues' list of {type, timing_sec}
+        scene: Scene dict with optional 'sfx_list' of
+            {file, offset_sec, volume, reason?}
 
     Returns:
-        List of dicts: [{type, timing_sec, r2_key, mix_db}, ...]
+        List of validated dicts: [{file, offset_sec, volume}, ...]
 
     Raises:
-        ValueError: if any cue.type is not in SFX_CATALOG
+        ValueError: if any item is missing required fields or has
+            out-of-range offset_sec / volume.
     """
-    cues = scene.get("sfx_cues", [])
+    items = scene.get("sfx_list", []) or []
+    duration_sec = float(scene.get("duration_sec", 0) or 0)
     result = []
-    for cue in cues:
-        sfx_type = cue["type"]
-        if sfx_type not in SFX_CATALOG:
-            raise ValueError(f"Unknown SFX type: {sfx_type!r}")
+    for idx, item in enumerate(items):
+        if not isinstance(item, dict):
+            raise ValueError(f"sfx_list[{idx}]: must be a dict")
+        for key in ("file", "offset_sec", "volume"):
+            if key not in item:
+                raise ValueError(f"sfx_list[{idx}]: missing required field {key!r}")
+        offset = float(item["offset_sec"])
+        volume = float(item["volume"])
+        # Allow small floating-point tolerance at end boundary
+        if offset < 0 or offset > duration_sec + 0.1:
+            raise ValueError(
+                f"sfx_list[{idx}]: offset_sec {offset} out of range "
+                f"[0, {duration_sec}]"
+            )
+        if volume < 0.0 or volume > 1.0:
+            raise ValueError(
+                f"sfx_list[{idx}]: volume {volume} out of range [0.0, 1.0]"
+            )
         result.append({
-            "type": sfx_type,
-            "timing_sec": cue["timing_sec"],
-            "r2_key": SFX_CATALOG[sfx_type]["r2_key"],
-            "mix_db": SFX_CATALOG[sfx_type]["mix_db"],
+            "file": str(item["file"]),
+            "offset_sec": offset,
+            "volume": volume,
         })
     return result
 
 
-def build_ffmpeg_audio_filter(narration_path, music_path, sfx_inputs):
-    """Build FFmpeg filter_complex for mixing narration + music + N SFX.
+def parse_ambient_bed(scene):
+    """Parse ambient_bed from scene manifest (V2 schema).
 
     Args:
-        narration_path: path to narration FLAC/MP3 (base level 1.0)
-        music_path: path to background music
-        sfx_inputs: list of {path, timing_sec, mix_db}
+        scene: Scene dict with optional 'ambient_bed' of {file, volume, reason?}
 
     Returns:
-        String filter_complex ready for -filter_complex arg.
-        Uses input indices 0=narration, 1=music, 2..N=SFX (caller must
-        pass inputs in that order to ffmpeg -i flags).
+        dict {file, volume} or None if no ambient_bed set.
+
+    Raises:
+        ValueError: if ambient_bed is present but missing required fields or
+            has out-of-range volume.
     """
+    bed = scene.get("ambient_bed")
+    if not bed:
+        return None
+    if not isinstance(bed, dict):
+        raise ValueError("ambient_bed: must be a dict")
+    for key in ("file", "volume"):
+        if key not in bed:
+            raise ValueError(f"ambient_bed: missing required field {key!r}")
+    volume = float(bed["volume"])
+    if volume < 0.0 or volume > 1.0:
+        raise ValueError(f"ambient_bed: volume {volume} out of range [0.0, 1.0]")
+    return {
+        "file": str(bed["file"]),
+        "volume": volume,
+    }
+
+
+def build_ffmpeg_audio_filter(
+    narration_idx=None,
+    music_idx=None,
+    sfx_inputs=None,
+    bed_inputs=None,
+):
+    """Build FFmpeg filter_complex for narration + music + SFX + ambient beds.
+
+    V2 signature — takes ffmpeg input indices and pre-computed absolute timings,
+    emits filter_complex with single [aout] label.
+
+    Args:
+        narration_idx: ffmpeg input index for narration, or None
+        music_idx: ffmpeg input index for music, or None
+        sfx_inputs: list of
+            {idx, offset_sec_abs, volume}
+            - idx: ffmpeg input index for this SFX file
+            - offset_sec_abs: absolute timeline position (scene_offset + scene-rel offset)
+            - volume: 0.0-1.0 linear
+        bed_inputs: list of
+            {idx, start_sec_abs, duration_sec, volume}
+            - idx: ffmpeg input index for this bed file
+            - start_sec_abs: absolute timeline start of the scene
+            - duration_sec: how long to keep the bed playing (loop if shorter)
+            - volume: 0.0-1.0 linear (typically 0.15-0.25)
+
+    Returns:
+        String filter_complex with final label [aout]. Empty string if no
+        audio inputs at all (caller handles that case).
+    """
+    sfx_inputs = sfx_inputs or []
+    bed_inputs = bed_inputs or []
+
     parts = []
+    labels = []
 
-    # Narration base (input 0)
-    parts.append("[0:a]volume=1.0[narr]")
+    if narration_idx is not None:
+        parts.append(f"[{narration_idx}:a]volume=1.0[narr]")
+        labels.append("[narr]")
 
-    # Music (input 1) - fixed 0.30 level per lesson #66 convention
-    parts.append("[1:a]volume=0.30[music]")
+    if music_idx is not None:
+        # Lesson #66: music at 0.30 post-normalize to sit under narration
+        parts.append(f"[{music_idx}:a]volume=0.30[music]")
+        labels.append("[music]")
 
-    # SFX inputs (2, 3, ...N)
-    sfx_labels = []
-    for i, sfx in enumerate(sfx_inputs, start=2):
-        label = f"sfx{i - 2}"
-        timing_ms = int(sfx["timing_sec"] * 1000)
-        # Convert dB to linear: 10^(db/20), rounded to 4 decimals
-        linear = round(10 ** (sfx["mix_db"] / 20.0), 4)
+    # Ambient beds: loop source if shorter than scene duration, trim to exact
+    # duration, then volume + adelay to align with scene start on timeline.
+    for i, bed in enumerate(bed_inputs):
+        idx = bed["idx"]
+        start_ms = int(bed["start_sec_abs"] * 1000)
+        dur = float(bed["duration_sec"])
+        vol = float(bed["volume"])
+        label = f"bed{i}"
+        # aloop=-1 infinite loop, size=2e9 max samples (ffmpeg requirement).
+        # atrim caps to scene duration, asetpts resets timestamps after trim.
         parts.append(
-            f"[{i}:a]volume={linear:.4f},"
-            f"adelay={timing_ms}|{timing_ms}[{label}]"
+            f"[{idx}:a]aloop=loop=-1:size=2000000000,"
+            f"atrim=duration={dur:.3f},asetpts=PTS-STARTPTS,"
+            f"volume={vol:.4f},"
+            f"adelay={start_ms}|{start_ms}[{label}]"
         )
-        sfx_labels.append(f"[{label}]")
+        labels.append(f"[{label}]")
 
-    # Final amix
-    all_labels = "[narr][music]" + "".join(sfx_labels)
-    total_inputs = 2 + len(sfx_inputs)
-    parts.append(
-        f"{all_labels}amix=inputs={total_inputs}:normalize=0:duration=longest,"
-        f"loudnorm=I=-16:TP=-1.5:LRA=11[aout]"
-    )
+    # SFX puntuales: volume + adelay to absolute timeline offset.
+    for i, sfx in enumerate(sfx_inputs):
+        idx = sfx["idx"]
+        off_ms = int(sfx["offset_sec_abs"] * 1000)
+        vol = float(sfx["volume"])
+        label = f"sfx{i}"
+        parts.append(
+            f"[{idx}:a]volume={vol:.4f},"
+            f"adelay={off_ms}|{off_ms}[{label}]"
+        )
+        labels.append(f"[{label}]")
+
+    if not labels:
+        return ""
+
+    if len(labels) == 1:
+        # Single source - no amix, just alias with acopy
+        parts.append(f"{labels[0]}acopy[aout]")
+    else:
+        all_in = "".join(labels)
+        parts.append(
+            f"{all_in}amix=inputs={len(labels)}:normalize=0:duration=longest,"
+            f"loudnorm=I=-16:TP=-1.5:LRA=11[aout]"
+        )
 
     return ";".join(parts)
 
@@ -2039,22 +2121,24 @@ def _compose_scene_manifest_impl(src, dest, content_id, config, channel, platfor
     has_ambient = ambient_concat_path is not None and os.path.isfile(ambient_concat_path)
     has_srt = os.path.exists(srt_path)
 
-    # ── SFX overlay (V1 2026-04-21) — collect cues from all scenes ──────────
-    # Aggregate sfx_cues from every scene in the manifest, download each unique
-    # R2 key once. Fail-open: if a file is missing in R2 (V1.5 assets pending),
-    # log a WARN and skip — never fail the entire compose for a missing SFX.
-    # Scenes without sfx_cues are skipped by parse_sfx_cues() returning [].
-    sfx_inputs = []  # [{path, timing_sec, mix_db, scene_offset_sec}, ...]
+    # ── SFX overlay (V2 2026-04-22) — collect sfx_list + ambient_bed ────────
+    # V2 schema: scene.sfx_list for puntuales (whoosh/impact/click/etc) and
+    # scene.ambient_bed for continuous drone under the scene. Files declared
+    # as path relative to {channel}/SFX/ in R2 (e.g. "whooshes/whoosh_01.flac").
+    # Fail-open: if a file is missing in R2, log WARN and skip that item —
+    # never fail the whole compose.
+    sfx_punctual = []  # [{path, offset_sec_abs, volume}, ...]
+    sfx_beds = []      # [{path, start_sec_abs, duration_sec, volume}, ...]
     if R2_ENABLED:
-        # Build a per-scene start-offset map so we can convert scene-relative
-        # timing_sec to absolute timeline position in the final video.
+        # Per-scene absolute-timeline start offset map. Matches merged_path
+        # timeline after Phase 2's xfade consumption of transition durations.
         scene_offset_map = {}
         _offset = 0.0
         for idx, _sc in enumerate(scenes):
             _sid = _sc["scene_id"]
-            _dur = _sc.get("duration_sec", 5)
+            _dur = float(_sc.get("duration_sec", 5) or 5)
             if idx > 0 and _sc.get("transition_in") in ("dissolve", "fade_black", "fade_white"):
-                _xf = float(_sc.get("transition_duration_sec", 0))
+                _xf = float(_sc.get("transition_duration_sec", 0) or 0)
                 _eff = max(0.0, _dur - _xf)
             else:
                 _eff = _dur
@@ -2063,45 +2147,72 @@ def _compose_scene_manifest_impl(src, dest, content_id, config, channel, platfor
 
         sfx_staging_dir = os.path.join(segments_dir, "_sfx")
         os.makedirs(sfx_staging_dir, exist_ok=True)
-        _downloaded_r2_keys = {}  # r2_key -> local_path (deduplicate per-key)
+        _download_cache = {}  # r2_key -> local_path or None (if missing)
+
+        def _resolve_sfx_file(rel_file):
+            """Download SFX from {channel}/SFX/{rel_file}. Returns local path or None."""
+            r2k = SFX_R2_PREFIX_FMT.format(channel=channel, file=rel_file)
+            if r2k in _download_cache:
+                return _download_cache[r2k]
+            local_name = rel_file.replace("/", "__")  # flatten category path
+            local_path = os.path.join(sfx_staging_dir, local_name)
+            try:
+                r2_helper.download_file(r2k, local_path)
+                _download_cache[r2k] = local_path
+                print(f"[SFX] Downloaded {r2k} -> {local_path}")
+                return local_path
+            except Exception as e:
+                print(f"WARN: SFX missing in R2: {r2k} — {e}")
+                _download_cache[r2k] = None
+                return None
 
         for _sc in scenes:
             _sid = _sc["scene_id"]
-            _sc_offset = scene_offset_map.get(_sid, 0.0)
+            _sc_start = scene_offset_map.get(_sid, 0.0)
+            _sc_dur = float(_sc.get("duration_sec", 5) or 5)
+
+            # Puntuales (sfx_list)
             try:
-                cues = parse_sfx_cues(_sc)
+                items = parse_sfx_list(_sc)
             except ValueError as e:
-                print(f"WARN: SFX parse error scene {_sid}: {e} — skipping")
-                continue
-            for cue in cues:
-                r2k = cue["r2_key"]
-                if r2k not in _downloaded_r2_keys:
-                    local_name = os.path.basename(r2k)
-                    local_path = os.path.join(sfx_staging_dir, local_name)
-                    try:
-                        r2_helper.download_file(r2k, local_path)
-                        _downloaded_r2_keys[r2k] = local_path
-                        print(f"[SFX] Downloaded {r2k} -> {local_path}")
-                    except Exception as e:
-                        print(f"WARN: SFX file missing in R2 (V1.5 pending): {r2k} — {e}")
-                        _downloaded_r2_keys[r2k] = None  # mark as unavailable
-                local_path = _downloaded_r2_keys[r2k]
-                if local_path is not None:
-                    abs_timing = _sc_offset + cue["timing_sec"]
-                    sfx_inputs.append({
-                        "path": local_path,
-                        "timing_sec": abs_timing,
-                        "mix_db": cue["mix_db"],
+                print(f"WARN: sfx_list parse error scene {_sid}: {e} — skipping items")
+                items = []
+            for item in items:
+                local = _resolve_sfx_file(item["file"])
+                if local is None:
+                    continue
+                sfx_punctual.append({
+                    "path": local,
+                    "offset_sec_abs": _sc_start + item["offset_sec"],
+                    "volume": item["volume"],
+                })
+
+            # Ambient bed (continuous during the scene)
+            try:
+                bed = parse_ambient_bed(_sc)
+            except ValueError as e:
+                print(f"WARN: ambient_bed parse error scene {_sid}: {e} — skipping")
+                bed = None
+            if bed is not None:
+                local = _resolve_sfx_file(bed["file"])
+                if local is not None:
+                    sfx_beds.append({
+                        "path": local,
+                        "start_sec_abs": _sc_start,
+                        "duration_sec": _sc_dur,
+                        "volume": bed["volume"],
                     })
 
-        if sfx_inputs:
-            print(f"[SFX] {len(sfx_inputs)} cue(s) loaded from {len(_downloaded_r2_keys)} unique file(s)")
+        if sfx_punctual or sfx_beds:
+            unique_files = sum(1 for v in _download_cache.values() if v is not None)
+            print(f"[SFX] {len(sfx_punctual)} puntuales + {len(sfx_beds)} beds "
+                  f"({unique_files} unique files)")
     else:
-        # R2 not enabled in this environment — SFX silently skipped
+        # R2 disabled in this environment — SFX silently skipped
         pass
 
     # Build FFmpeg command with dynamic audio mixing
-    # Input indices: 0=video, then narration/music/ambient/sfx in order
+    # Input indices: 0=video, then narration/music/ambient/beds/sfx in order
     cmd = ["ffmpeg", "-y", "-i", merged_path]
     input_idx = 1
     narr_idx = music_idx = amb_idx = None
@@ -2119,62 +2230,62 @@ def _compose_scene_manifest_impl(src, dest, content_id, config, channel, platfor
         amb_idx = input_idx
         input_idx += 1
 
-    # Inject SFX inputs after ambient (only when we have narration+music to mix)
-    sfx_input_meta = []  # [{ffmpeg_idx, timing_sec, mix_db}, ...]
-    if sfx_inputs and has_narration and has_music:
-        for sfx in sfx_inputs:
-            cmd += ["-i", sfx["path"]]
-            sfx_input_meta.append({
-                "ffmpeg_idx": input_idx,
-                "timing_sec": sfx["timing_sec"],
-                "mix_db": sfx["mix_db"],
+    # Inject ambient bed inputs (continuous per-scene drones)
+    bed_meta = []  # [{idx, start_sec_abs, duration_sec, volume}, ...]
+    if sfx_beds and has_narration:
+        for bed in sfx_beds:
+            cmd += ["-i", bed["path"]]
+            bed_meta.append({
+                "idx": input_idx,
+                "start_sec_abs": bed["start_sec_abs"],
+                "duration_sec": bed["duration_sec"],
+                "volume": bed["volume"],
             })
             input_idx += 1
 
-    # Build audio filter chain
-    audio_inputs = []
-    filter_parts = []
-    if narr_idx is not None:
-        filter_parts.append(f"[{narr_idx}:a]volume=1.0[narr]")
-        audio_inputs.append("[narr]")
-    if music_idx is not None:
-        filter_parts.append(f"[{music_idx}:a]volume=0.30[music]")
-        audio_inputs.append("[music]")
+    # Inject SFX puntual inputs
+    sfx_meta = []  # [{idx, offset_sec_abs, volume}, ...]
+    if sfx_punctual and has_narration:
+        for sfx in sfx_punctual:
+            cmd += ["-i", sfx["path"]]
+            sfx_meta.append({
+                "idx": input_idx,
+                "offset_sec_abs": sfx["offset_sec_abs"],
+                "volume": sfx["volume"],
+            })
+            input_idx += 1
+
+    # Build audio filter chain (V2: delegate to build_ffmpeg_audio_filter helper)
+    # The helper handles narration + music + beds + sfx_punctual; we splice it
+    # into the full filter_complex (which also includes optional SRT burn-in).
     if amb_idx is not None:
-        # Ambient disabled — video models generate full clips with audio handled separately
-        # filter_parts.append(f"[{amb_idx}:a]volume=0.08[amb]")
-        # audio_inputs.append("[amb]")  # ambient stream not defined, don't reference it
+        # Ambient extracted from video clips is disabled (lesson: video models
+        # generate full clips with audio handled separately). Do not wire amb_idx.
         has_ambient = False
 
-    # Inject SFX filter parts (after narr + music, before amix)
-    for sfx_meta in sfx_input_meta:
-        fidx = sfx_meta["ffmpeg_idx"]
-        timing_ms = int(sfx_meta["timing_sec"] * 1000)
-        linear = round(10 ** (sfx_meta["mix_db"] / 20.0), 4)
-        label = f"sfx{fidx}"
-        filter_parts.append(
-            f"[{fidx}:a]volume={linear:.4f},adelay={timing_ms}|{timing_ms}[{label}]"
-        )
-        audio_inputs.append(f"[{label}]")
+    audio_filter = build_ffmpeg_audio_filter(
+        narration_idx=narr_idx,
+        music_idx=music_idx,
+        sfx_inputs=sfx_meta,
+        bed_inputs=bed_meta,
+    )
+    filter_parts = audio_filter.split(";") if audio_filter else []
+    # audio_inputs kept for compatibility with existing branching below; the
+    # helper emits [aout] directly so we mark a single logical "has_audio" flag.
+    has_audio = bool(audio_filter)
+    audio_inputs = ["[aout]"] if has_audio else []
 
     srt_filter = f"subtitles={srt_path}:force_style='FontSize=22,PrimaryColour=&H00FFFFFF'" if has_srt else None
 
-    if audio_inputs:
-        if len(audio_inputs) > 1:
-            mix_filter = "".join(audio_inputs) + f"amix=inputs={len(audio_inputs)}:duration=longest[aout]"
-            filter_parts.append(mix_filter)
-            # When using filter_complex, subtitles must be inside it (can't mix -vf and -filter_complex)
-            if srt_filter:
-                filter_parts.insert(0, f"[0:v]{srt_filter}[vout]")
-                cmd += ["-filter_complex", ";".join(filter_parts), "-map", "[vout]", "-map", "[aout]"]
-            else:
-                cmd += ["-filter_complex", ";".join(filter_parts), "-map", "0:v", "-map", "[aout]"]
+    if has_audio:
+        # build_ffmpeg_audio_filter already emitted final [aout] label.
+        # When SRT burn-in is needed, add video filter [0:v]subtitles=...[vout]
+        # as a prefix in the same filter_complex (can't mix -vf with -filter_complex).
+        if srt_filter:
+            filter_parts.insert(0, f"[0:v]{srt_filter}[vout]")
+            cmd += ["-filter_complex", ";".join(filter_parts), "-map", "[vout]", "-map", "[aout]"]
         else:
-            # Single audio source, no mixing needed
-            src_idx = narr_idx or music_idx or amb_idx
-            cmd += ["-map", "0:v", "-map", f"{src_idx}:a"]
-            if srt_filter:
-                cmd += ["-vf", srt_filter]
+            cmd += ["-filter_complex", ";".join(filter_parts), "-map", "0:v", "-map", "[aout]"]
         cmd += [*NVENC_HQ_ARGS,
                 "-c:a", "aac", "-b:a", "192k", output_path]
     elif has_srt:
@@ -2189,6 +2300,8 @@ def _compose_scene_manifest_impl(src, dest, content_id, config, channel, platfor
         if has_narration: layers.append("narration")
         if has_music: layers.append("music")
         if has_ambient: layers.append("ambient")
+        if bed_meta: layers.append(f"bed×{len(bed_meta)}")
+        if sfx_meta: layers.append(f"sfx×{len(sfx_meta)}")
         print(f"Phase 3: mixing {' + '.join(layers) if layers else 'video only'}")
         result = _run_ffmpeg_with_nvenc_fallback(cmd, timeout=900, label="phase3_mux")
         if result.returncode != 0:
