@@ -316,6 +316,120 @@ def image_to_base64(image_path):
         return base64.b64encode(f.read()).decode("utf-8")
 
 
+# ── Brand mark signature cache + overlay ──────────────────────────────────
+# Default R2 key for Dominion's crown+globe mark (400x400 transparent PNG).
+# Source: Dominion-YouTube-Brand/02-vectores-fuente/avatar.svg re-rendered.
+DEFAULT_MARK_R2_KEY = "dominion/visual-assets/brand/thumb-mark.png"
+_MARK_CACHE_DIR = "/tmp/brand_marks"
+_MARK_CACHE = {}
+
+
+def _ensure_mark_local(r2_key):
+    """Download brand mark PNG from R2 to local cache (once per worker).
+
+    Returns local path, or None on failure (overlay becomes a no-op).
+    """
+    if not r2_key:
+        return None
+    cached = _MARK_CACHE.get(r2_key)
+    if cached and os.path.exists(cached):
+        return cached
+    if not R2_ENABLED:
+        print(f"[WARN] Mark signature requested but R2 disabled (key={r2_key})")
+        return None
+    try:
+        os.makedirs(_MARK_CACHE_DIR, exist_ok=True)
+        safe_name = r2_key.replace("/", "_")
+        local_path = os.path.join(_MARK_CACHE_DIR, safe_name)
+        if not os.path.exists(local_path):
+            r2_helper.download_file(r2_key, local_path)
+            print(f"[INFO] Brand mark downloaded from R2: {r2_key} -> {local_path}")
+        _MARK_CACHE[r2_key] = local_path
+        return local_path
+    except Exception as e:
+        print(f"[WARN] Failed to download brand mark {r2_key}: {e}")
+        return None
+
+
+def apply_mark_signature(thumbnail_path, mark_path, output_path,
+                         size=90, position="br", padding=25, opacity=0.60):
+    """Overlay brand mark signature on thumbnail.
+
+    Separate from apply_text_overlay — runs AFTER text is composited so the
+    mark sits on top of everything (like a publication's corner logo).
+
+    Args:
+        thumbnail_path: path del thumbnail base (1280x720) — typically output
+            of apply_text_overlay or the post-processed base if no text.
+        mark_path: path del mark PNG (transparent background recommended).
+        output_path: path destino del resultado.
+        size: tamaño del mark en target en px (default 90).
+        position: 'br' (bottom-right, default), 'bl', 'tr', 'tl'.
+        padding: margen desde el borde en px (default 25).
+        opacity: 0.0-1.0 del overlay final (default 0.60).
+
+    Returns output_path on success, None on failure. Fail-open philosophy:
+    a missing/corrupt mark must NOT block thumbnail generation.
+    """
+    if not mark_path or not os.path.exists(mark_path):
+        return None
+
+    gravity_map = {
+        "br": "SouthEast",
+        "bl": "SouthWest",
+        "tr": "NorthEast",
+        "tl": "NorthWest",
+    }
+    gravity = gravity_map.get(position, "SouthEast")
+
+    # Clamp opacity + size to sane ranges.
+    try:
+        opacity_val = float(opacity)
+    except (TypeError, ValueError):
+        opacity_val = 0.60
+    opacity_val = max(0.0, min(1.0, opacity_val))
+
+    try:
+        size_val = int(size)
+    except (TypeError, ValueError):
+        size_val = 90
+    size_val = max(16, min(400, size_val))
+
+    try:
+        padding_val = int(padding)
+    except (TypeError, ValueError):
+        padding_val = 25
+    padding_val = max(0, padding_val)
+
+    # ImageMagick composite:
+    #   (mark_path resized to NxN with alpha scaled by opacity)
+    #   over thumbnail, anchored via -gravity + -geometry padding.
+    cmd = [
+        "convert", thumbnail_path,
+        "(", mark_path,
+             "-resize", f"{size_val}x{size_val}",
+             "-alpha", "set",
+             "-channel", "A",
+             "-evaluate", "multiply", f"{opacity_val:.3f}",
+             "+channel",
+        ")",
+        "-gravity", gravity,
+        "-geometry", f"+{padding_val}+{padding_val}",
+        "-composite",
+        output_path,
+    ]
+
+    try:
+        result = subprocess.run(cmd, capture_output=True, text=True, timeout=30)
+        if result.returncode != 0:
+            print(f"[WARN] ImageMagick mark overlay failed: {result.stderr[:300]}")
+            return None
+        return output_path
+    except Exception as e:
+        print(f"[WARN] Mark signature error: {e}")
+        return None
+
+
 _INPUTS_DOWNLOADED = False
 
 
@@ -530,12 +644,50 @@ def handler(job):
         result_path = apply_text_overlay(base_image, overlay_text, thumb_output, overlay_config)
         if result_path and os.path.exists(result_path):
             overlay_applied = True
+
+            # ── Brand mark signature overlay (post text overlay) ──
+            # Default ENABLED for all Dominion thumbnails; every channel can
+            # override via payload.mark_signature.{enabled,size,position,opacity,r2_key}.
+            # Fail-open: mark errors never block thumbnail production.
+            mark_cfg = job_input.get("mark_signature") or {}
+            channel_str = (channel or "").lower()
+            mark_default_enabled = channel_str == "dominion"
+            mark_enabled = bool(mark_cfg.get("enabled", mark_default_enabled))
+            mark_applied = False
+
+            if mark_enabled:
+                mark_r2_key = mark_cfg.get("r2_key", DEFAULT_MARK_R2_KEY)
+                mark_local = _ensure_mark_local(mark_r2_key)
+                if mark_local:
+                    mark_output = os.path.join(dest, f"{prefix}_signed.png")
+                    signed_path = apply_mark_signature(
+                        thumbnail_path=result_path,
+                        mark_path=mark_local,
+                        output_path=mark_output,
+                        size=mark_cfg.get("size", 90),
+                        position=mark_cfg.get("position", "br"),
+                        padding=mark_cfg.get("padding", 25),
+                        opacity=mark_cfg.get("opacity", 0.60),
+                    )
+                    if signed_path and os.path.exists(signed_path):
+                        # Replace: _final.png IS the signed thumbnail. Keep one
+                        # canonical output so downstream consumers (YouTube upload,
+                        # Status Router) don't need to know about the new field.
+                        try:
+                            shutil.copyfile(signed_path, result_path)
+                            os.remove(signed_path)
+                            mark_applied = True
+                            print(f"[INFO] Brand mark signature applied to {prefix}_final.png")
+                        except Exception as e:
+                            print(f"[WARN] Could not finalize signed thumbnail: {e}")
+
             thumbnail_b64 = image_to_base64(result_path)
             thumb_entry = {
                 "filename": f"{prefix}_final.png",
                 "path": result_path,
                 "node_id": "text_overlay",
                 "size_mb": round(os.path.getsize(result_path) / 1024 / 1024, 2),
+                "mark_applied": mark_applied,
             }
             # Upload thumbnail to R2
             if R2_ENABLED:
