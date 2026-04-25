@@ -2984,6 +2984,23 @@ def _render_short(job_input):
     srt_r2_key = job_input.get("srt_r2_key")  # optional
     caption_style = job_input.get("caption_style", "kinetic")
 
+    # Letterbox framing (2026-04-25): preserve horizontal context instead of pure
+    # 9:16 center crop. crop_pct=45 keeps 55% of original width centered, then
+    # scales to 1080 wide and pads vertically with black bars to 1920 tall.
+    # Validated visually with 8-sample A/B (4 crops × 2 bgs) on 0001_s1 — Ray
+    # chose 45% crop + black bg as Dominion documentary signature.
+    framing_crop_pct = float(job_input.get("short_framing_crop_pct", 45))
+    framing_bg_mode = job_input.get("short_background_mode", "black")
+    if framing_crop_pct < 0 or framing_crop_pct > 67:
+        raise RuntimeError(
+            f"short_framing_crop_pct must be 0-67 (got {framing_crop_pct}). "
+            f"67 = legacy pure 9:16 center crop. 0 = full 16:9 letterbox."
+        )
+    if framing_bg_mode not in ("black", "blur"):
+        raise RuntimeError(
+            f"short_background_mode must be 'black' or 'blur' (got '{framing_bg_mode}')"
+        )
+
     if not R2_ENABLED:
         raise RuntimeError("R2 not enabled — Shorts pipeline requires R2 for source + output")
 
@@ -3016,10 +3033,33 @@ def _render_short(job_input):
                 ass_path = None
 
         # 3. Build ffmpeg filter chain
-        # Center-crop 16:9 → 9:16, then scale to 1080x1920
-        # crop=ih*9/16:ih — width = height*9/16, height = source height
-        # Then offset x so crop is centered: x=(iw-ih*9/16)/2
-        vf = "crop=ih*9/16:ih:((iw-ih*9/16)/2):0,scale=1080:1920,setsar=1"
+        # Letterbox framing: crop horizontally by `framing_crop_pct`% from center,
+        # scale to 1080 wide preserving aspect, pad vertically to 1080×1920 with
+        # black bars or blurred background.
+        # Special case crop_pct=67: legacy pure 9:16 center crop (no letterbox).
+        if framing_crop_pct >= 66.99:
+            # Legacy: full 9:16 crop, fills 1080×1920 entirely
+            vf_base = "crop=ih*9/16:ih:((iw-ih*9/16)/2):0,scale=1080:1920,setsar=1"
+        elif framing_bg_mode == "black":
+            # Crop horizontal % from center, scale to 1080 wide, pad to 1080×1920 black
+            crop_factor = (100 - framing_crop_pct) / 100.0
+            vf_base = (
+                f"crop=iw*{crop_factor:.4f}:ih,"
+                f"scale=1080:-2,"
+                f"pad=1080:1920:(ow-iw)/2:(oh-ih)/2:color=black,"
+                f"setsar=1"
+            )
+        else:
+            # Blur background: split source, blur one branch + crop+scale other branch, overlay
+            crop_factor = (100 - framing_crop_pct) / 100.0
+            vf_base = (
+                f"split[orig][cropme];"
+                f"[orig]scale=1080:1920:force_original_aspect_ratio=increase,"
+                f"crop=1080:1920,boxblur=20:2[bg];"
+                f"[cropme]crop=iw*{crop_factor:.4f}:ih,scale=1080:-2[main];"
+                f"[bg][main]overlay=(W-w)/2:(H-h)/2,setsar=1"
+            )
+        vf = vf_base
         if ass_path:
             # ffmpeg subtitles filter uses colon/backslash-escaped path; on Linux,
             # the raw path works if we wrap in single quotes. Use the filename
