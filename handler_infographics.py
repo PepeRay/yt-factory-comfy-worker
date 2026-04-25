@@ -48,14 +48,33 @@ PROJECTS_ROOT = "/tmp/projects"
 DEFAULT_OUTPUT_FPS = 30
 CAPTURE_FPS = 15            # Chromium screenshot loop rate; encoding upsamples to OUTPUT_FPS
 # CSS animation playback rate via CDP. 1.0 = real-time. <1.0 = slower.
-# Dominion CSS anims finish in ~2.6s real-time which felt too fast on YouTube.
-# 0.6 stretches to ~4.3s, in the 2-4s range that reads well on screen.
-ANIMATION_PLAYBACK_RATE = 0.6
-# Active capture window — must cover full animation at the chosen playback rate.
-# Dominion anims 2.6s nominal × (1/0.6) = 4.3s + 0.7s buffer = 5.0s
-ANIMATION_CAPTURE_SEC = 5.0
-RENDER_TIMEOUT_SEC = 240    # 4 min hard cap for Puppeteer render
-ENCODE_TIMEOUT_SEC = 120    # 2 min hard cap for ffmpeg encode
+# Lesson #84 (2026-04-25): templates visual-infographics ahora son multi-stage
+# diseñadas en timeline NATIVO de 11s (Stage 1 entry 0-3s, Stage 2 reveal 3-7s,
+# Stage 3 emphasis 7-11s). NO hace falta slow down — playbackRate 1.0 ahora.
+# Anti-patrón anterior: 0.6 stretching anims que de todos modos eran 1.5s — daba
+# 2.5s de motion en una capture window de 5s con 65-75% de tiempo estático.
+ANIMATION_PLAYBACK_RATE = 1.0
+# Active capture window — debe cubrir el full timeline 0-11s del nuevo stage system.
+# Dynamic: cap a 11s (todo el ciclo Stage 1+2+3) o duration_sec - 2 si es menor
+# para garantizar al menos 2s de hold final para lectura.
+# Función `get_animation_capture_sec(duration_sec)` debajo.
+ANIMATION_CAPTURE_SEC_MAX = 11.0
+ANIMATION_CAPTURE_SEC_MIN = 5.0
+ANIMATION_HOLD_MIN_SEC = 2.0
+RENDER_TIMEOUT_SEC = 360    # 6 min hard cap for Puppeteer render (was 4 min)
+ENCODE_TIMEOUT_SEC = 180    # 3 min hard cap for ffmpeg encode (was 2 min)
+
+
+def get_animation_capture_sec(duration_sec: float) -> float:
+    """
+    Compute capture window per Lesson #84 multi-stage system.
+    Templates visual-infographics span 0-11s natively (Stage 1+2+3).
+    For scenes shorter than 11s+min-hold, cap to leave 2s static hold for reading.
+    For scenes longer than 13s, capture the full 11s timeline + tpad clone the rest.
+    """
+    if duration_sec <= ANIMATION_CAPTURE_SEC_MIN + ANIMATION_HOLD_MIN_SEC:
+        return max(3.0, duration_sec - ANIMATION_HOLD_MIN_SEC)
+    return min(ANIMATION_CAPTURE_SEC_MAX, duration_sec - ANIMATION_HOLD_MIN_SEC)
 
 
 def handler(event):
@@ -133,9 +152,9 @@ def _handler_impl(work_dir, html_url, duration_sec, scene_id, video_id, channel)
     os.makedirs(frames_dir, exist_ok=True)
 
     output_fps = DEFAULT_OUTPUT_FPS
-    # Active capture window — animation phase. Cap at duration_sec for very
-    # short scenes (rare; most scenes are >= 5s).
-    animation_sec = min(ANIMATION_CAPTURE_SEC, duration_sec)
+    # Active capture window — animation phase. Lesson #84 multi-stage system:
+    # cap a 11s (Stage 1+2+3) o duration-2 si es menor para 2s hold mínimo.
+    animation_sec = get_animation_capture_sec(duration_sec)
     hold_final_sec = max(0.0, duration_sec - animation_sec)
     target_capture_frames = int(round(animation_sec * CAPTURE_FPS))
 
