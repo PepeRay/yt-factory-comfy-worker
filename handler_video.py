@@ -1775,123 +1775,239 @@ def _compose_scene_manifest_impl(src, dest, content_id, config, channel, platfor
         os.remove(amb_list)
     else:
         ambient_concat_path = None
-    # ── Phase 2: Apply transitions ──
-    merged_path = segment_paths[0]["path"]
+    # ── Phase 2: Apply transitions (3-pass concat copy optimization, lesson #87) ──
+    #
+    # Background:
+    # - Old approach: linear loop, every iteration re-encoded the full
+    #   accumulating merged + new segment with NVENC_HQ. O(N²) total work.
+    #   For 56 scenes × 12s avg, last iter re-encoded ~660s. ~3h on CPU.
+    # - New approach: 3-pass strategy (lesson #87, 2026-04-25)
+    #     Pass A — Pre-grouping (Python only): walk segment_paths, build "runs"
+    #              of contiguous segments joined by "cut" transitions. Each xfade
+    #              breaks a run.
+    #     Pass B — Concat copy per run: for each run, ffmpeg concat -c copy
+    #              run_NN.mp4. ZERO re-encode. Probe duration ±0.3s and fallback
+    #              to per-run re-encode if truncation detected (preserves Fix K
+    #              guardrail — concat copy historically truncated silently at
+    #              file boundaries; this fallback rescues without paying full
+    #              compose-wide re-encode cost).
+    #     Pass C — Apply xfade between runs: identical loop to old code but
+    #              units are runs (large files) instead of individual segments.
+    #              Reduces #re-encodes from N-1 (one per segment) to K (one per
+    #              xfade). For 56 scenes × ~12 xfades → 12 re-encodes vs 55.
+    # - Estimated speedup: 4-5× (3h → 35-50min on CPU).
+    # - Codec compatibility: all Phase 1 outputs are h264 yuv420p high profile
+    #   30fps 1920×1080 (NVENC_HQ for image effects, NVENC_NORM for video_clip
+    #   and gap fillers). The cq differs (19 vs 23) but only affects per-stream
+    #   bitrate, not concat compatibility.
+    # - Fix K guardrails preserved: +genpts+igndts on concat copy + duration
+    #   probe with explicit error on truncation.
 
+    # Pass A — Pre-grouping into runs (Python only, no ffmpeg)
+    runs = []  # each run: {"segs": [paths], "scenes": [scene_dicts], "xfade_after": {name, t_dur, last_scene_id} or None}
+    current_run = {"segs": [segment_paths[0]["path"]], "scenes": [segment_paths[0]["scene"]], "xfade_after": None}
     for i in range(1, len(segment_paths)):
         seg = segment_paths[i]
         scene = seg["scene"]
         transition = scene.get("transition_in", "cut")
         t_dur = scene.get("transition_duration_sec", 0)
-
         if transition == "cut" or t_dur <= 0:
-            # Concat with re-encode + PTS regeneration.
-            #
-            # History:
-            # - Original: "-c copy" + re-encode fallback on returncode!=0.
-            #   Silently truncated final video to 163.37s because concat-copy
-            #   returned 0 despite the output stream dying at splice points.
-            # - Fix H (2026-04-13): switched to always re-encode through
-            #   NVENC_HQ. Did NOT fix the truncation — the re-encode processed
-            #   a stream that was already broken at the concat demuxer level.
-            #   The concat demuxer was dropping frames at file boundaries due
-            #   to PTS/DTS discontinuity between segments produced by
-            #   different render paths (image effects vs video_clip Pass 3).
-            # - Fix K (2026-04-13): add "-fflags +genpts+igndts" to the
-            #   concat demuxer call. +genpts regenerates presentation PTS
-            #   from DTS; +igndts ignores incoming DTS so the demuxer stops
-            #   using it to decide "this file has ended". With both flags,
-            #   the demuxer emits a contiguous monotonic stream across file
-            #   boundaries and the re-encode produces a full-length merged.
-            # - Fix K also adds per-iteration probe-and-log: we ffprobe each
-            #   merged_NNNN output and compare against the expected running
-            #   total. If any iteration produces a segment shorter than
-            #   expected by >0.3s, we raise loudly instead of continuing
-            #   with a contaminated merged file. This converts silent
-            #   truncation into an explicit error with diagnostic data.
-            concat_out = os.path.join(segments_dir, f"merged_{i:04d}.mp4")
-            concat_list = os.path.join(segments_dir, f"concat_{i}.txt")
-            with open(concat_list, "w") as f:
-                f.write(f"file '{merged_path}'\nfile '{seg['path']}'\n")
-            cmd = [
-                "ffmpeg", "-y",
-                "-fflags", "+genpts+igndts",
-                "-f", "concat", "-safe", "0",
-                "-i", concat_list, "-r", str(FPS),
-                *NVENC_HQ_ARGS, "-an", concat_out,
-            ]
-            # Timeout scales with total output length. Late iterations on CPU
-            # endpoints with libx264 fallback re-encode the full merged+seg,
-            # which can exceed 10min on full-length videos (~680s).
-            try:
-                _seg_dur_est = _get_video_duration(seg["path"])
-                _merged_dur_est = _get_video_duration(merged_path)
-                _total_est = _seg_dur_est + _merged_dur_est
-            except Exception:
-                _total_est = 700
-            concat_timeout = max(600, min(1800, int(_total_est * 3) + 120))
-            result = _run_ffmpeg_with_nvenc_fallback(cmd, timeout=concat_timeout, label=f"phase2_concat {i}")
-            try:
-                os.remove(concat_list)
-            except OSError:
-                pass
-            if result.returncode != 0:
-                raise RuntimeError(f"Phase 2 concat {i} failed: {result.stderr[-300:]}")
-            # Fix K: verify concat_out actually contains merged + seg.
-            try:
-                merged_in_dur = _get_video_duration(merged_path)
-                seg_in_dur = _get_video_duration(seg["path"])
-                concat_out_dur = _get_video_duration(concat_out)
-                expected = merged_in_dur + seg_in_dur
-                delta_dur = expected - concat_out_dur
-                sid = scene.get("scene_id", "?")
-                if delta_dur > 0.3:
-                    print(f"ERROR: phase2_concat iter={i} sid={sid} TRUNCATED: merged_in={merged_in_dur:.4f} + seg_in={seg_in_dur:.4f} = expected {expected:.4f} but concat_out={concat_out_dur:.4f} (missing {delta_dur:.4f}s)")
-                    raise RuntimeError(f"Phase 2 concat {i} truncated: expected={expected:.4f} got={concat_out_dur:.4f} missing={delta_dur:.4f}s")
-                print(f"[phase2_concat iter={i} sid={sid}] merged={merged_in_dur:.3f}s + seg={seg_in_dur:.3f}s = {concat_out_dur:.3f}s (expected {expected:.3f}, delta {delta_dur:+.3f})")
-            except RuntimeError:
-                raise
-            except Exception as e:
-                print(f"WARN: phase2_concat iter={i} duration probe failed: {e}")
-            merged_path = concat_out
+            # Continue current run
+            current_run["segs"].append(seg["path"])
+            current_run["scenes"].append(scene)
         else:
-            # xfade transition (dissolve, fadeblack, fadewhite)
+            # xfade breaks the run: close current, open new
             xfade_name = {
                 "dissolve": "dissolve",
                 "fade_black": "fadeblack",
                 "fade_white": "fadewhite",
             }.get(transition, "dissolve")
+            current_run["xfade_after"] = {
+                "name": xfade_name,
+                "t_dur": t_dur,
+                "next_scene_id": scene.get("scene_id", "?"),
+            }
+            runs.append(current_run)
+            current_run = {"segs": [seg["path"]], "scenes": [scene], "xfade_after": None}
+    runs.append(current_run)
 
-            merged_dur = _get_video_duration(merged_path)
-            offset = max(0, merged_dur - t_dur)
-            xfade_out = os.path.join(segments_dir, f"merged_{i:04d}.mp4")
+    n_xfades = sum(1 for r in runs if r["xfade_after"] is not None)
+    print(f"Phase 2 Pass A: {len(segment_paths)} segments grouped into {len(runs)} runs ({n_xfades} xfades break boundaries)")
 
-            cmd = [
-                "ffmpeg", "-y", "-i", merged_path, "-i", seg["path"],
-                "-filter_complex",
-                f"[0:v][1:v]xfade=transition={xfade_name}:duration={t_dur}:offset={offset}",
-                *NVENC_HQ_ARGS, xfade_out
+    # Pass B — Concat copy per run (ZERO re-encode in happy path)
+    run_paths = []  # parallel to runs[], each entry is the path of the merged run file
+    for run_idx, run in enumerate(runs):
+        if len(run["segs"]) == 1:
+            # Single-segment run: no concat needed, reuse the segment file directly
+            run_paths.append(run["segs"][0])
+            print(f"  [run {run_idx:02d}] 1 seg, mode=passthrough, path={os.path.basename(run['segs'][0])}")
+            continue
+
+        run_out = os.path.join(segments_dir, f"run_{run_idx:02d}.mp4")
+        concat_list = os.path.join(segments_dir, f"run_{run_idx:02d}_list.txt")
+        with open(concat_list, "w") as f:
+            for seg_path in run["segs"]:
+                f.write(f"file '{seg_path}'\n")
+
+        # Compute expected duration for probe validation
+        try:
+            seg_durations = [_get_video_duration(p) for p in run["segs"]]
+            expected_dur = sum(seg_durations)
+        except Exception:
+            expected_dur = None
+
+        # Try concat -c copy first (fast path, zero re-encode)
+        cmd_copy = [
+            "ffmpeg", "-y",
+            "-fflags", "+genpts+igndts",
+            "-f", "concat", "-safe", "0",
+            "-i", concat_list,
+            "-c", "copy", run_out,
+        ]
+        copy_timeout = max(60, min(600, int((expected_dur or 600) * 0.2) + 30))
+        result = subprocess.run(cmd_copy, capture_output=True, text=True, timeout=copy_timeout)
+
+        if result.returncode != 0:
+            # concat copy failed (rare): fall back to re-encode for this run
+            print(f"  [run {run_idx:02d}] WARN concat copy failed (rc={result.returncode}): {result.stderr[-200:]}")
+            print(f"  [run {run_idx:02d}] falling back to NVENC_HQ re-encode for this run only")
+            cmd_reenc = [
+                "ffmpeg", "-y",
+                "-fflags", "+genpts+igndts",
+                "-f", "concat", "-safe", "0",
+                "-i", concat_list, "-r", str(FPS),
+                *NVENC_HQ_ARGS, "-an", run_out,
             ]
-            # Timeout scales with merged length. xfade requires re-encoding the
-            # ENTIRE merged video, so late iterations on CPU endpoints with
-            # libx264 fallback can exceed 5min on full-length videos (~680s).
-            # Observed 2026-04-19: Phase 2 last iter (merged_0053 + seg_0054)
-            # timed out at 300s with libx264 -preset fast -crf 18. Generous
-            # budget: ~3x realtime on CPU, capped at 30min.
-            xfade_timeout = max(300, min(1800, int(merged_dur * 3) + 120))
-            result = _run_ffmpeg_with_nvenc_fallback(cmd, timeout=xfade_timeout, label=f"xfade {xfade_name}")
+            reenc_timeout = max(600, min(1800, int((expected_dur or 700) * 3) + 120))
+            result = _run_ffmpeg_with_nvenc_fallback(cmd_reenc, timeout=reenc_timeout, label=f"run {run_idx} reencode")
             if result.returncode != 0:
-                print(f"WARN: xfade {transition} failed at scene {scene['scene_id']}, falling back to cut")
-                # Fallback to concat
-                concat_list = os.path.join(segments_dir, f"concat_{i}.txt")
-                with open(concat_list, "w") as f:
-                    f.write(f"file '{merged_path}'\nfile '{seg['path']}'\n")
-                cmd = ["ffmpeg", "-y", "-f", "concat", "-safe", "0", "-i", concat_list, "-c", "copy", xfade_out]
-                subprocess.run(cmd, capture_output=True, text=True, timeout=300)
-                os.remove(concat_list)
-            merged_path = xfade_out
+                try: os.remove(concat_list)
+                except OSError: pass
+                raise RuntimeError(f"Phase 2 run {run_idx} re-encode also failed: {result.stderr[-300:]}")
+            mode_used = "reencode_fallback"
+        else:
+            mode_used = "copy"
 
-    print(f"Phase 2 done: transitions applied")
+        try: os.remove(concat_list)
+        except OSError: pass
+
+        # Probe duration (Fix K guardrail preserved): silent truncation safety net
+        if expected_dur is not None:
+            try:
+                actual_dur = _get_video_duration(run_out)
+                delta = expected_dur - actual_dur
+                if delta > 0.3:
+                    if mode_used == "copy":
+                        # Concat copy truncated silently — fallback to re-encode
+                        print(f"  [run {run_idx:02d}] WARN concat copy truncated by {delta:.3f}s (expected={expected_dur:.3f}, got={actual_dur:.3f}). Re-encoding.")
+                        cmd_reenc = [
+                            "ffmpeg", "-y",
+                            "-fflags", "+genpts+igndts",
+                            "-f", "concat", "-safe", "0",
+                            "-i", os.path.join(segments_dir, f"run_{run_idx:02d}_list.txt"),
+                            "-r", str(FPS),
+                            *NVENC_HQ_ARGS, "-an", run_out,
+                        ]
+                        # Need to rewrite list (we deleted it above)
+                        list_path = os.path.join(segments_dir, f"run_{run_idx:02d}_list.txt")
+                        with open(list_path, "w") as f:
+                            for seg_path in run["segs"]:
+                                f.write(f"file '{seg_path}'\n")
+                        reenc_timeout = max(600, min(1800, int(expected_dur * 3) + 120))
+                        result = _run_ffmpeg_with_nvenc_fallback(cmd_reenc, timeout=reenc_timeout, label=f"run {run_idx} truncation_recovery")
+                        try: os.remove(list_path)
+                        except OSError: pass
+                        if result.returncode != 0:
+                            raise RuntimeError(f"Phase 2 run {run_idx} truncation recovery failed: {result.stderr[-300:]}")
+                        actual_dur = _get_video_duration(run_out)
+                        delta = expected_dur - actual_dur
+                        mode_used = "reencode_truncation_recovery"
+                        if delta > 0.3:
+                            raise RuntimeError(f"Phase 2 run {run_idx} truncation persists after re-encode: expected={expected_dur:.3f} got={actual_dur:.3f} missing={delta:.3f}s")
+                    else:
+                        raise RuntimeError(f"Phase 2 run {run_idx} re-encode produced truncated output: expected={expected_dur:.3f} got={actual_dur:.3f} missing={delta:.3f}s")
+                print(f"  [run {run_idx:02d}] {len(run['segs'])} segs, mode={mode_used}, expected={expected_dur:.3f}s, got={actual_dur:.3f}s, delta={delta:+.3f}s")
+            except RuntimeError:
+                raise
+            except Exception as e:
+                print(f"  [run {run_idx:02d}] WARN duration probe failed: {e}")
+
+        run_paths.append(run_out)
+
+    # Pass C — Apply xfade transitions between consecutive runs
+    # The accumulator (merged_path) starts at runs[0] and grows by xfade-merging
+    # with runs[1], runs[2], ... wherever runs[k].xfade_after is set.
+    # For runs joined by "cut" boundary (xfade_after=None on previous run),
+    # this should never happen (Pass A always opens a new run on xfade only),
+    # but defensive: if xfade_after is None, just concat copy.
+    merged_path = run_paths[0]
+    for k in range(1, len(run_paths)):
+        prev_run = runs[k - 1]
+        next_run_path = run_paths[k]
+        xf = prev_run["xfade_after"]
+        merged_out = os.path.join(segments_dir, f"merged_{k:04d}.mp4")
+        if xf is not None:
+            # xfade re-encode (the only place we re-encode in Phase 2)
+            merged_dur = _get_video_duration(merged_path)
+            offset = max(0, merged_dur - xf["t_dur"])
+            cmd = [
+                "ffmpeg", "-y", "-i", merged_path, "-i", next_run_path,
+                "-filter_complex",
+                f"[0:v][1:v]xfade=transition={xf['name']}:duration={xf['t_dur']}:offset={offset}",
+                *NVENC_HQ_ARGS, merged_out,
+            ]
+            # Same generous timeout as legacy: ~3× realtime on CPU, cap 30min.
+            xfade_timeout = max(300, min(1800, int(merged_dur * 3) + 120))
+            result = _run_ffmpeg_with_nvenc_fallback(cmd, timeout=xfade_timeout, label=f"xfade {xf['name']} k={k}")
+            if result.returncode != 0:
+                print(f"  [xfade k={k}] WARN xfade {xf['name']} failed (rc={result.returncode}), falling back to concat copy: {result.stderr[-200:]}")
+                concat_list = os.path.join(segments_dir, f"merged_{k:04d}_list.txt")
+                with open(concat_list, "w") as f:
+                    f.write(f"file '{merged_path}'\nfile '{next_run_path}'\n")
+                cmd_fallback = [
+                    "ffmpeg", "-y",
+                    "-fflags", "+genpts+igndts",
+                    "-f", "concat", "-safe", "0",
+                    "-i", concat_list, "-c", "copy", merged_out,
+                ]
+                subprocess.run(cmd_fallback, capture_output=True, text=True, timeout=300)
+                try: os.remove(concat_list)
+                except OSError: pass
+            print(f"  [xfade k={k}] {xf['name']} t_dur={xf['t_dur']:.3f}s offset={offset:.3f}s -> merged_{k:04d}.mp4")
+        else:
+            # No xfade between prev_run and next_run — concat copy (defensive,
+            # Pass A logic should prevent this case but handle gracefully)
+            print(f"  [merge k={k}] no xfade (defensive concat copy)")
+            concat_list = os.path.join(segments_dir, f"merged_{k:04d}_list.txt")
+            with open(concat_list, "w") as f:
+                f.write(f"file '{merged_path}'\nfile '{next_run_path}'\n")
+            cmd_copy = [
+                "ffmpeg", "-y",
+                "-fflags", "+genpts+igndts",
+                "-f", "concat", "-safe", "0",
+                "-i", concat_list, "-c", "copy", merged_out,
+            ]
+            result = subprocess.run(cmd_copy, capture_output=True, text=True, timeout=300)
+            try: os.remove(concat_list)
+            except OSError: pass
+            if result.returncode != 0:
+                raise RuntimeError(f"Phase 2 merge k={k} concat copy failed: {result.stderr[-300:]}")
+        merged_path = merged_out
+
+    # Final duration sanity check (Fix K-style: catch any silent truncation)
+    try:
+        final_merged_dur = _get_video_duration(merged_path)
+        # Expected: sum of all segment durations minus xfade overlap (each xfade
+        # consumes t_dur from the merged timeline as the next clip overlaps).
+        sum_seg_dur = sum(_get_video_duration(sp["path"]) for sp in segment_paths)
+        sum_xfade_dur = sum(r["xfade_after"]["t_dur"] for r in runs if r["xfade_after"] is not None)
+        expected_final = sum_seg_dur - sum_xfade_dur
+        delta_final = expected_final - final_merged_dur
+        print(f"Phase 2 done: {len(segment_paths)} segs, {len(runs)} runs, {n_xfades} xfades. Final={final_merged_dur:.3f}s expected={expected_final:.3f}s delta={delta_final:+.3f}s")
+        if abs(delta_final) > 0.5:
+            print(f"WARN: Phase 2 final duration delta exceeds 0.5s ({delta_final:+.3f}s). This may indicate concat issues. Continuing — Phase 2.5 safety pad will adjust.")
+    except Exception as e:
+        print(f"WARN: Phase 2 final duration probe failed: {e}")
 
     # ── Phase 2.5: Safety net — pad merged video to match audio length ──
     #
