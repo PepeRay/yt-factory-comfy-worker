@@ -2126,19 +2126,94 @@ def _compose_scene_manifest_impl(src, dest, content_id, config, channel, platfor
             delta_total = target_total - merged_real
             print(f"Phase 2.5: target={target_total:.4f}s (source={target_source}) merged={merged_real:.4f}s delta={delta_total:+.4f}s")
             if delta_total > 0.1:
+                # Lesson #90 (2026-04-25): replace tpad=stop_mode=clone (visible
+                # freeze frame) with ken_burns_slow zoompan on the last frame.
+                # Same total duration but viewer perceives gentle motion instead
+                # of a frozen tail. Same pattern as Wan video_clip freeze-tail
+                # (lesson #30, lines 1349-1452 of this file). Three passes:
+                #   2.5a — extract last frame from merged_path → PNG
+                #   2.5b — render zoompan ken_burns_slow from PNG for delta_total
+                #   2.5c — concat (demuxer +genpts+igndts) merged + tail
+                tail_png = os.path.join(segments_dir, "merged_tail.png")
+                tail_seg = os.path.join(segments_dir, "merged_tail.mp4")
+                concat_list = os.path.join(segments_dir, "merged_concat.txt")
                 safety_out = os.path.join(segments_dir, "merged_safety.mp4")
-                cmd = [
+                fallback_cmd = [
                     "ffmpeg", "-y", "-i", merged_path,
                     "-vf", f"tpad=stop_mode=clone:stop_duration={delta_total:.4f}",
                     "-r", str(FPS),
                     *NVENC_HQ_ARGS, "-an", safety_out,
                 ]
-                result = _run_ffmpeg_with_nvenc_fallback(cmd, timeout=600, label="phase2.5_safety")
-                if result.returncode == 0:
+                applied = False
+                try:
+                    # Pass 2.5a: extract last frame
+                    ext_cmd = [
+                        "ffmpeg", "-y", "-sseof", "-0.1", "-i", merged_path,
+                        "-vsync", "0", "-frames:v", "1", "-q:v", "2", tail_png,
+                    ]
+                    ext_res = subprocess.run(ext_cmd, capture_output=True, text=True, timeout=30)
+                    if ext_res.returncode != 0 or not os.path.exists(tail_png):
+                        raise RuntimeError(f"extract last frame failed: {ext_res.stderr[-200:]}")
+
+                    # Pass 2.5b: render zoompan ken_burns_slow from PNG
+                    tail_frames = max(1, int(round(delta_total * FPS)))
+                    zoom_end = 1.06
+                    if tail_frames <= 1:
+                        zoom_expr = "1.0"
+                    else:
+                        zoom_expr = f"1.0+({zoom_end-1.0:.4f})*on/{tail_frames-1}"
+                    zp_filter = (
+                        f"scale={WIDTH*4}:{HEIGHT*4}:flags=lanczos,"
+                        f"zoompan=z='{zoom_expr}':x='iw/2-(iw/zoom/2)':y='ih/2-(ih/zoom/2)':"
+                        f"d={tail_frames}:s={WIDTH}x{HEIGHT}:fps={FPS},"
+                        f"setsar=1"
+                    )
+                    cmd_tail = [
+                        "ffmpeg", "-y",
+                        "-framerate", str(FPS), "-loop", "1", "-i", tail_png,
+                        "-vf", zp_filter,
+                        "-t", f"{delta_total:.4f}",
+                        "-r", str(FPS),
+                        *NVENC_HQ_ARGS, "-an", tail_seg,
+                    ]
+                    tail_res = _run_ffmpeg_with_nvenc_fallback(cmd_tail, timeout=300, label="phase2.5_tail_kenburns")
+                    if tail_res.returncode != 0 or not os.path.exists(tail_seg):
+                        raise RuntimeError(f"tail render failed: {tail_res.stderr[-200:]}")
+
+                    # Pass 2.5c: concat demuxer with PTS regen (Fix K pattern)
+                    with open(concat_list, "w") as f:
+                        f.write(f"file '{os.path.basename(merged_path)}'\n")
+                        f.write(f"file '{os.path.basename(tail_seg)}'\n")
+                    cc_cmd = [
+                        "ffmpeg", "-y",
+                        "-fflags", "+genpts+igndts",
+                        "-f", "concat", "-safe", "0",
+                        "-i", concat_list, "-fps_mode", "passthrough",
+                        "-c", "copy", "-an", safety_out,
+                    ]
+                    cc_res = subprocess.run(cc_cmd, capture_output=True, text=True, timeout=300)
+                    if cc_res.returncode != 0:
+                        raise RuntimeError(f"concat copy failed: {cc_res.stderr[-200:]}")
+
+                    # Verify duration
+                    safety_dur = _get_video_duration(safety_out)
+                    if abs(safety_dur - target_total) > 1.0:
+                        raise RuntimeError(f"safety_out duration {safety_dur:.3f}s vs target {target_total:.3f}s — drift > 1s")
+
                     merged_path = safety_out
-                    print(f"Phase 2.5: safety pad +{delta_total:.4f}s applied (merged={merged_real:.4f} → target={target_total:.4f})")
-                else:
-                    print(f"WARN: safety pad failed: {result.stderr[-200:]}")
+                    applied = True
+                    print(f"Phase 2.5: ken_burns_slow tail +{delta_total:.4f}s applied (merged={merged_real:.4f} -> target={target_total:.4f}, safety_dur={safety_dur:.4f})")
+                except Exception as ke:
+                    print(f"WARN: Phase 2.5 ken_burns failed ({ke}); falling back to tpad clone freeze")
+                    fb_res = _run_ffmpeg_with_nvenc_fallback(fallback_cmd, timeout=600, label="phase2.5_safety_fallback")
+                    if fb_res.returncode == 0:
+                        merged_path = safety_out
+                        applied = True
+                        print(f"Phase 2.5: safety pad +{delta_total:.4f}s applied (FALLBACK freeze)")
+                    else:
+                        print(f"WARN: tpad fallback also failed: {fb_res.stderr[-200:]}")
+                if not applied:
+                    print(f"WARN: Phase 2.5 could not pad — proceeding with merged={merged_real:.4f} (target {target_total:.4f})")
             else:
                 print(f"Phase 2.5: no pad needed (merged={merged_real:.4f} target={target_total:.4f} delta={delta_total:.4f})")
         except Exception as e:
@@ -2206,11 +2281,25 @@ def _compose_scene_manifest_impl(src, dest, content_id, config, channel, platfor
             from_s = act["from_scene"]
             to_s = act["to_scene"]
 
-            track = os.path.join(music_dir, f"{mood}.mp3")
-            if not os.path.isfile(track):
-                track = os.path.join(music_dir, "default.mp3")
-            if not os.path.isfile(track):
-                print(f"Music: no track for mood '{mood}', skipping act {i}")
+            # Music tracks may be .flac, .mp3, .wav, or .m4a — probe in order.
+            # Lesson #89 (2026-04-25): Dominion R2 has .flac files but handler
+            # only checked .mp3 → all 7 acts skipped, music_idx=None, sidechain
+            # ducking inactive, audio bit-exact identical to a no-music build.
+            # Bug latent across 0001/0002/0003.
+            track = None
+            for _ext in ("flac", "mp3", "wav", "m4a"):
+                _candidate = os.path.join(music_dir, f"{mood}.{_ext}")
+                if os.path.isfile(_candidate):
+                    track = _candidate
+                    break
+            if track is None:
+                for _ext in ("flac", "mp3", "wav", "m4a"):
+                    _candidate = os.path.join(music_dir, f"default.{_ext}")
+                    if os.path.isfile(_candidate):
+                        track = _candidate
+                        break
+            if track is None:
+                print(f"Music: no track for mood '{mood}' (no flac/mp3/wav/m4a), skipping act {i}")
                 continue
 
             # Calculate act duration from scene range
