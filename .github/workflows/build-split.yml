@@ -517,3 +517,129 @@ jobs:
         id: meta
         run: |
           echo "image_tag=${{ env.IMAGE_PREFIX }}-infographics:${{ github.sha }}" >> "$GITHUB_OUTPUT"
+
+  update-runpod-compose:
+    # Auto-updates the RunPod CPU compose template (id eqpgeipx1x) when
+    # build-compose succeeds. Added 2026-04-25 — eliminates manual PATCH friction
+    # observed during 0003 recovery (had to PATCH manually after each push).
+    # Same REST PATCH pattern as update-runpod-{audio,video}: atomic, only
+    # imageName, pinned by full commit SHA.
+    needs: build-compose
+    if: needs.build-compose.result == 'success'
+    runs-on: ubuntu-latest
+    steps:
+      - name: Verify image exists in GHCR + PATCH RunPod compose template
+        env:
+          RUNPOD_API_KEY: ${{ secrets.RUNPOD_API_KEY }}
+          GHCR_PULL_TOKEN: ${{ secrets.GITHUB_TOKEN }}
+          TEMPLATE_ID: eqpgeipx1x
+          NEW_IMAGE: ${{ needs.build-compose.outputs.image_tag }}
+        run: |
+          set -euo pipefail
+
+          if [ -z "${RUNPOD_API_KEY:-}" ]; then
+            echo "ERROR: RUNPOD_API_KEY secret is missing"
+            exit 1
+          fi
+
+          REPO_TAG="${NEW_IMAGE#ghcr.io/}"
+          REPO="${REPO_TAG%:*}"
+          TAG="${REPO_TAG##*:}"
+          echo "Verifying ${REPO}:${TAG} exists in GHCR..."
+
+          GHCR_TOKEN=$(curl -sS -u "x:${GHCR_PULL_TOKEN}" \
+            "https://ghcr.io/token?service=ghcr.io&scope=repository:${REPO}:pull" | jq -r '.token')
+
+          HTTP_CODE=$(curl -sS -o /dev/null -w "%{http_code}" -I \
+            -H "Authorization: Bearer ${GHCR_TOKEN}" \
+            -H "Accept: application/vnd.oci.image.index.v1+json,application/vnd.docker.distribution.manifest.v2+json" \
+            "https://ghcr.io/v2/${REPO}/manifests/${TAG}")
+
+          if [ "$HTTP_CODE" != "200" ]; then
+            echo "ERROR: Image ${NEW_IMAGE} not found in GHCR (HTTP ${HTTP_CODE})"
+            exit 1
+          fi
+          echo "Image manifest found in GHCR"
+
+          echo "PATCHing RunPod CPU compose template (id=${TEMPLATE_ID})..."
+          PATCH_BODY=$(jq -cn --arg img "$NEW_IMAGE" '{imageName: $img}')
+
+          RESPONSE=$(curl -sS -X PATCH "https://rest.runpod.io/v1/templates/${TEMPLATE_ID}" \
+            -H "Authorization: Bearer ${RUNPOD_API_KEY}" \
+            -H "Content-Type: application/json" \
+            -d "$PATCH_BODY")
+
+          UPDATED_IMAGE=$(echo "$RESPONSE" | jq -r '.imageName // empty')
+          if [ "$UPDATED_IMAGE" != "$NEW_IMAGE" ]; then
+            echo "ERROR: PATCH did not apply correctly"
+            echo "Expected: ${NEW_IMAGE}"
+            echo "Got     : ${UPDATED_IMAGE}"
+            echo "Response: ${RESPONSE}" | jq -r 'del(.env)'
+            exit 1
+          fi
+
+          echo "=== RunPod CPU compose template updated successfully ==="
+          echo "Template ID  : ${TEMPLATE_ID}"
+          echo "New imageName: ${UPDATED_IMAGE}"
+
+  update-runpod-infographics:
+    # Auto-updates the RunPod Infographics template (id 9ramakn80q) when
+    # build-infographics succeeds. Added 2026-04-25 — eliminates manual PATCH
+    # friction observed during 0003 recovery. Same pattern as other update jobs.
+    needs: build-infographics
+    if: needs.build-infographics.result == 'success'
+    runs-on: ubuntu-latest
+    steps:
+      - name: Verify image exists in GHCR + PATCH RunPod infographics template
+        env:
+          RUNPOD_API_KEY: ${{ secrets.RUNPOD_API_KEY }}
+          GHCR_PULL_TOKEN: ${{ secrets.GITHUB_TOKEN }}
+          TEMPLATE_ID: 9ramakn80q
+          NEW_IMAGE: ${{ needs.build-infographics.outputs.image_tag }}
+        run: |
+          set -euo pipefail
+
+          if [ -z "${RUNPOD_API_KEY:-}" ]; then
+            echo "ERROR: RUNPOD_API_KEY secret is missing"
+            exit 1
+          fi
+
+          REPO_TAG="${NEW_IMAGE#ghcr.io/}"
+          REPO="${REPO_TAG%:*}"
+          TAG="${REPO_TAG##*:}"
+          echo "Verifying ${REPO}:${TAG} exists in GHCR..."
+
+          GHCR_TOKEN=$(curl -sS -u "x:${GHCR_PULL_TOKEN}" \
+            "https://ghcr.io/token?service=ghcr.io&scope=repository:${REPO}:pull" | jq -r '.token')
+
+          HTTP_CODE=$(curl -sS -o /dev/null -w "%{http_code}" -I \
+            -H "Authorization: Bearer ${GHCR_TOKEN}" \
+            -H "Accept: application/vnd.oci.image.index.v1+json,application/vnd.docker.distribution.manifest.v2+json" \
+            "https://ghcr.io/v2/${REPO}/manifests/${TAG}")
+
+          if [ "$HTTP_CODE" != "200" ]; then
+            echo "ERROR: Image ${NEW_IMAGE} not found in GHCR (HTTP ${HTTP_CODE})"
+            exit 1
+          fi
+          echo "Image manifest found in GHCR"
+
+          echo "PATCHing RunPod Infographics template (id=${TEMPLATE_ID})..."
+          PATCH_BODY=$(jq -cn --arg img "$NEW_IMAGE" '{imageName: $img}')
+
+          RESPONSE=$(curl -sS -X PATCH "https://rest.runpod.io/v1/templates/${TEMPLATE_ID}" \
+            -H "Authorization: Bearer ${RUNPOD_API_KEY}" \
+            -H "Content-Type: application/json" \
+            -d "$PATCH_BODY")
+
+          UPDATED_IMAGE=$(echo "$RESPONSE" | jq -r '.imageName // empty')
+          if [ "$UPDATED_IMAGE" != "$NEW_IMAGE" ]; then
+            echo "ERROR: PATCH did not apply correctly"
+            echo "Expected: ${NEW_IMAGE}"
+            echo "Got     : ${UPDATED_IMAGE}"
+            echo "Response: ${RESPONSE}" | jq -r 'del(.env)'
+            exit 1
+          fi
+
+          echo "=== RunPod Infographics template updated successfully ==="
+          echo "Template ID  : ${TEMPLATE_ID}"
+          echo "New imageName: ${UPDATED_IMAGE}"
