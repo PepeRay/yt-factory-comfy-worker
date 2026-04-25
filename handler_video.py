@@ -1883,12 +1883,20 @@ def _compose_scene_manifest_impl(src, dest, content_id, config, channel, platfor
         except Exception:
             expected_dur = None
 
-        # Try concat -c copy first (fast path, zero re-encode)
+        # Try concat -c copy first (fast path, zero re-encode).
+        # Lesson #87 fix (2026-04-25): added "-fps_mode passthrough" after Ray
+        # detected progressive timing drift in 0003 nuevo (transitions ~22s
+        # shorter than original by end of video). Root cause: muxer was dropping
+        # 1 frame per segment boundary during concat copy because +genpts/+igndts
+        # caused timestamp collisions. -fps_mode passthrough tells the muxer to
+        # NOT do frame dup/drop — keep all frames as-is. -c copy still applies
+        # (no re-encode), only muxer behavior changes.
         cmd_copy = [
             "ffmpeg", "-y",
             "-fflags", "+genpts+igndts",
             "-f", "concat", "-safe", "0",
             "-i", concat_list,
+            "-fps_mode", "passthrough",
             "-c", "copy", run_out,
         ]
         copy_timeout = max(60, min(600, int((expected_dur or 600) * 0.2) + 30))
@@ -1995,7 +2003,9 @@ def _compose_scene_manifest_impl(src, dest, content_id, config, channel, platfor
                     "ffmpeg", "-y",
                     "-fflags", "+genpts+igndts",
                     "-f", "concat", "-safe", "0",
-                    "-i", concat_list, "-c", "copy", merged_out,
+                    "-i", concat_list,
+                    "-fps_mode", "passthrough",
+                    "-c", "copy", merged_out,
                 ]
                 subprocess.run(cmd_fallback, capture_output=True, text=True, timeout=300)
                 try: os.remove(concat_list)
@@ -2012,7 +2022,9 @@ def _compose_scene_manifest_impl(src, dest, content_id, config, channel, platfor
                 "ffmpeg", "-y",
                 "-fflags", "+genpts+igndts",
                 "-f", "concat", "-safe", "0",
-                "-i", concat_list, "-c", "copy", merged_out,
+                "-i", concat_list,
+                "-fps_mode", "passthrough",
+                "-c", "copy", merged_out,
             ]
             result = subprocess.run(cmd_copy, capture_output=True, text=True, timeout=300)
             try: os.remove(concat_list)
