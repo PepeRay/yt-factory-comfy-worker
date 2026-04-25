@@ -239,8 +239,12 @@ def build_ffmpeg_audio_filter(
         labels.append("[narr]")
 
     if music_idx is not None:
-        # Lesson #66: music at 0.30 post-normalize to sit under narration
-        parts.append(f"[{music_idx}:a]volume=0.30[music]")
+        # Lesson #66 (2026-04-19): bumped 0.20 -> 0.30 (Ray: musica casi inaudible)
+        # Lesson #83 (2026-04-25): bumped 0.30 -> 0.40 (Ray: "ya no escucho la musica" en 0002+0003)
+        # Loudness post-fix-#66: bass band (musica) -19.4 LUFS vs narracion -16 LUFS = 24 dB gap.
+        # 0.40 efectivo 0.20 post-amix normalize=1 -> ~3 dB mas percibido.
+        # Backlog: si 0.40 sigue bajo, alternativa B = sidechain ducking dinamico.
+        parts.append(f"[{music_idx}:a]volume=0.40[music]")
         labels.append("[music]")
 
     # Ambient beds: loop source if shorter than scene duration, trim to exact
