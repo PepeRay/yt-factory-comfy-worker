@@ -234,17 +234,44 @@ def build_ffmpeg_audio_filter(
     parts = []
     labels = []
 
+    # Sidechain ducking activates when BOTH narration and music are present.
+    # Lessons #66 (0.20 -> 0.30) and #83 (0.30 -> 0.40) tried static volume bumps
+    # but Ray reported music still inaudible in 0002 and 0003. Diagnostic on 0003
+    # _NEW.mp4 audio: integrated -17.3 LUFS, bass band -19.5 LUFS, speech band -20.2
+    # LUFS, LRA 3.8 LU. The loudnorm I=-16 was crushing dynamics so music ended up
+    # at the same loudness as voice — they fused, music never stood out.
+    # Lesson #88 (2026-04-25): switch to sidechain ducking. Music plays at higher
+    # baseline (0.7), automatically ducked -8 to -10 dB while narration speaks,
+    # springs back in narrative silences. Preserves dynamic range, keeps music
+    # audible without competing with voice.
+    needs_sidechain = narration_idx is not None and music_idx is not None
+
     if narration_idx is not None:
         parts.append(f"[{narration_idx}:a]volume=1.0[narr]")
-        labels.append("[narr]")
+        if needs_sidechain:
+            # Split narration: one copy goes to mix, one is the sidechain key
+            parts.append("[narr]asplit=2[narr_main][narr_key]")
+            labels.append("[narr_main]")
+        else:
+            labels.append("[narr]")
 
     if music_idx is not None:
-        # Lesson #66 (2026-04-19): bumped 0.20 -> 0.30 (Ray: musica casi inaudible)
-        # Lesson #83 (2026-04-25): bumped 0.30 -> 0.40 (Ray: "ya no escucho la musica" en 0002+0003)
-        # Loudness post-fix-#66: bass band (musica) -19.4 LUFS vs narracion -16 LUFS = 24 dB gap.
-        # 0.40 efectivo 0.20 post-amix normalize=1 -> ~3 dB mas percibido.
-        # Backlog: si 0.40 sigue bajo, alternativa B = sidechain ducking dinamico.
-        parts.append(f"[{music_idx}:a]volume=0.40[music]")
+        if needs_sidechain:
+            # Music at 0.7 baseline (vs 0.4 static). Sidechain compress with
+            # narration as key trigger:
+            #   threshold=0.05 (-26 dB linear): triggers on any voiced narration
+            #   ratio=8: strong ducking (-8 dB when fully active)
+            #   attack=50ms: fast attenuation when voice starts
+            #   release=300ms: smooth recovery in silences (~300ms feels natural)
+            #   makeup=1: transparent (no extra gain — loudnorm handles overall level)
+            parts.append(f"[{music_idx}:a]volume=0.7[music_raw]")
+            parts.append(
+                "[music_raw][narr_key]sidechaincompress="
+                "threshold=0.05:ratio=8:attack=50:release=300:makeup=1[music]"
+            )
+        else:
+            # No narration to trigger ducking — fall back to static volume
+            parts.append(f"[{music_idx}:a]volume=0.40[music]")
         labels.append("[music]")
 
     # Ambient beds: loop source if shorter than scene duration, trim to exact
