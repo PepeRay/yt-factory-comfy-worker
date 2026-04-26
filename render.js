@@ -72,7 +72,7 @@ async function render(htmlPath, framesDir, animationSec, targetFps, playbackRate
     await page.setViewport({
       width: VIEWPORT.width,
       height: VIEWPORT.height,
-      deviceScaleFactor: 1,
+      deviceScaleFactor: 2,
     });
 
     // Apply CSS animation slowdown via DOM mutation BEFORE navigation.

@@ -231,15 +231,20 @@ def _handler_impl(work_dir, html_url, duration_sec, scene_id, video_id, channel)
     )
 
     # Conditional filter: tpad only if hold_final_sec > 0
+    # Lesson #88 (2026-04-26): render.js now uses deviceScaleFactor=2,
+    # so PNG inputs are 3840x2160. We downscale to 1920x1080 with lanczos
+    # for crisp typography (Playfair italic + 1px borders) without doubling
+    # final MP4 size. tpad must run BEFORE scale to clone full-res frames.
+    vf_chain = []
+    if hold_final_sec > 0.05:
+        vf_chain.append(f"tpad=stop_mode=clone:stop_duration={hold_final_sec:.3f}")
+    vf_chain.append("scale=1920:1080:flags=lanczos")
     encode_cmd = [
         "ffmpeg", "-y",
         "-loglevel", "warning",
         "-framerate", f"{actual_capture_fps:.3f}",
         "-i", os.path.join(frames_dir, "frame_%05d.png"),
-    ]
-    if hold_final_sec > 0.05:  # epsilon to avoid noise filter for tiny holds
-        encode_cmd += ["-vf", f"tpad=stop_mode=clone:stop_duration={hold_final_sec:.3f}"]
-    encode_cmd += [
+        "-vf", ",".join(vf_chain),
         "-c:v", "libx264",
         "-preset", "medium",
         "-crf", "18",
