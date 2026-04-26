@@ -2525,6 +2525,13 @@ def _compose_scene_manifest_impl(src, dest, content_id, config, channel, platfor
 
     srt_filter = f"subtitles={srt_path}:force_style='FontSize=22,PrimaryColour=&H00FFFFFF'" if has_srt else None
 
+    # Lesson #91 (2026-04-26): always emit `-movflags +faststart` so the moov
+    # atom lives at the file head. Without it, ffmpeg writes moov AFTER mdat
+    # → Windows Movies & TV / browsers / mobile players fail with codec errors
+    # (0xC00D36E5 in Windows native player) because they cannot start
+    # playback without first reading the index. VLC tolerates moov-at-end so
+    # the bug stayed latent across 0001/0002/0003.
+    faststart_args = ["-movflags", "+faststart"]
     if has_audio:
         # build_ffmpeg_audio_filter already emitted final [aout] label.
         # When SRT burn-in is needed, add video filter [0:v]subtitles=...[vout]
@@ -2535,13 +2542,18 @@ def _compose_scene_manifest_impl(src, dest, content_id, config, channel, platfor
         else:
             cmd += ["-filter_complex", ";".join(filter_parts), "-map", "0:v", "-map", "[aout]"]
         cmd += [*NVENC_HQ_ARGS,
-                "-c:a", "aac", "-b:a", "192k", output_path]
+                "-c:a", "aac", "-b:a", "192k",
+                *faststart_args, output_path]
     elif has_srt:
         cmd += ["-vf", srt_filter,
-                *NVENC_HQ_ARGS, output_path]
+                *NVENC_HQ_ARGS, *faststart_args, output_path]
     else:
-        shutil.copy2(merged_path, output_path)
-        cmd = None
+        # No audio + no SRT path used to skip ffmpeg entirely (shutil.copy2);
+        # but to guarantee faststart on every output, do a remux instead.
+        cmd = [
+            "ffmpeg", "-y", "-i", merged_path,
+            "-c", "copy", *faststart_args, output_path,
+        ]
 
     if cmd:
         layers = []
