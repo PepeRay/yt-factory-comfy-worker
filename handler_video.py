@@ -2954,16 +2954,38 @@ def _sec_to_ass_time(s):
     return f"{h}:{m:02d}:{sec:05.2f}"
 
 
-def _srt_subset_to_ass(srt_entries, t_start, t_end, ass_path, style_name="kinetic"):
+def _srt_subset_to_ass(srt_entries, t_start, t_end, ass_path, style_name="kinetic", framing_crop_pct=67):
     """Filter SRT entries to [t_start, t_end], shift to 0-based, write ASS.
     Returns number of caption events written. 0 if no overlap.
 
     Premium mode (style.premium_reveal=True): splits each cue into ~2-word
     chunks, each displayed sequentially within the cue's time window. Currency
     + big-number phrases ('$39 trillion', '900 billion', '15%') get inline
-    gold color tag. Mimics Hormozi/Mr Beast caption style for short-form."""
+    gold color tag. Mimics Hormozi/Mr Beast caption style for short-form.
+
+    Letterbox-aware MarginV (2026-04-25): when framing_crop_pct < 67, frame is
+    letterboxed (16:9 centered with black bars). Captions must land INSIDE the
+    frame (not in black bars) AND above YouTube Shorts UI overlay zone (~y>1440
+    reserved). Recomputes MarginV dynamically:
+      - 67% (legacy full crop): use style.margin_v as-is (240 default)
+      - <67%  (letterbox): place caption ~80px above frame bottom, inside frame
+    """
     style = _SHORT_CAPTION_STYLES.get(style_name, _SHORT_CAPTION_STYLES["kinetic"])
     premium_reveal = style.get("premium_reveal", False)
+
+    # Compute effective MarginV based on letterbox framing
+    if framing_crop_pct >= 66.99:
+        margin_v = style["margin_v"]  # legacy: caption near bottom of full canvas
+    else:
+        # crop_w = 1920 * (1 - pct/100); frame_h after scale-to-1080-wide
+        crop_w = 1920 * (1 - framing_crop_pct / 100.0)
+        frame_h = round((1080 * 1080) / crop_w / 2) * 2  # round to even
+        # Frame is centered vertically in 1080×1920 canvas
+        frame_bottom_y = 960 + frame_h // 2
+        # Caption baseline 80px above frame bottom (inside frame, visible margin)
+        # Also ensure above YouTube Shorts UI overlay (y>1440 reserved)
+        caption_baseline_y = min(frame_bottom_y - 80, 1430)
+        margin_v = 1920 - caption_baseline_y
 
     # Filter + shift + (optionally) chunk into 2-word groups
     events = []
@@ -3032,7 +3054,7 @@ def _srt_subset_to_ass(srt_entries, t_start, t_end, ass_path, style_name="kineti
         f"Style: Default,{style['font']},{style['fontsize']},"
         f"{style['primary']},&H00FFFFFF,{style['outline_color']},{style['back_color']},"
         f"{style['bold']},0,0,0,100,100,{style.get('spacing', 0)},0,1,{style['outline']},{style['shadow']},"
-        f"{style['alignment']},80,80,{style['margin_v']},1",
+        f"{style['alignment']},80,80,{margin_v},1",
         "",
         "[Events]",
         "Format: Layer, Start, End, Style, Name, MarginL, MarginR, MarginV, Effect, Text",
@@ -3124,7 +3146,8 @@ def _render_short(job_input):
                 entries = _parse_srt_entries(local_srt)
                 ass_path = os.path.join(work_dir, "captions.ass")
                 caption_events = _srt_subset_to_ass(
-                    entries, t_start, t_end, ass_path, caption_style
+                    entries, t_start, t_end, ass_path, caption_style,
+                    framing_crop_pct=framing_crop_pct,
                 )
                 if caption_events == 0:
                     print(f"[WARN] render-short {short_id}: SRT had no events in window")
