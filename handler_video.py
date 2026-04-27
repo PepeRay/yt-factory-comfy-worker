@@ -1866,6 +1866,17 @@ def _compose_scene_manifest_impl(src, dest, content_id, config, channel, platfor
     print(f"Phase 2 Pass A: {len(segment_paths)} segments grouped into {len(runs)} runs ({n_xfades} xfades break boundaries)")
 
     # Pass B — Concat copy per run (ZERO re-encode in happy path)
+    # Lesson #88 (2026-04-27): force re-encode for MIXED runs (segments with
+    # different render_types: image effect + video_clip + infographic). With
+    # NVENC unavailable on CPU5, segments encoded by different paths
+    # (NVENC_HQ_ARGS for image effects vs NVENC_NORM_ARGS for video_clip
+    # 3-pass) end up with libx264 fallback at different CRF (18 vs 26),
+    # different B-frames patterns, and different GOP structures. concat copy
+    # then silently drops frames at boundaries, replacing video_clip motion
+    # with last keyframe duplicates (Ray observed video_clips appearing
+    # static + Phase 2 dropping ~41s of frames over 35 xfades cascade).
+    # Mitigation: detect mixed runs by render_type diversity and force
+    # uniform re-encode with NVENC_HQ_ARGS (auto-fallback libx264 CRF 18).
     run_paths = []  # parallel to runs[], each entry is the path of the merged run file
     for run_idx, run in enumerate(runs):
         if len(run["segs"]) == 1:
@@ -1873,6 +1884,11 @@ def _compose_scene_manifest_impl(src, dest, content_id, config, channel, platfor
             run_paths.append(run["segs"][0])
             print(f"  [run {run_idx:02d}] 1 seg, mode=passthrough, path={os.path.basename(run['segs'][0])}")
             continue
+
+        # Detect mixed run: multiple distinct render_types in this run.
+        # If mixed, skip concat copy and go straight to uniform re-encode.
+        render_types = {s.get("render_type", "ken_burns") for s in run["scenes"]}
+        is_mixed = len(render_types) > 1
 
         run_out = os.path.join(segments_dir, f"run_{run_idx:02d}.mp4")
         concat_list = os.path.join(segments_dir, f"run_{run_idx:02d}_list.txt")
@@ -1887,7 +1903,41 @@ def _compose_scene_manifest_impl(src, dest, content_id, config, channel, platfor
         except Exception:
             expected_dur = None
 
-        # Try concat -c copy first (fast path, zero re-encode).
+        if is_mixed:
+            # Force uniform re-encode for mixed runs (lesson #88).
+            print(f"  [run {run_idx:02d}] MIXED render_types {sorted(render_types)} -> forcing uniform re-encode")
+            cmd_reenc = [
+                "ffmpeg", "-y",
+                "-fflags", "+genpts+igndts",
+                "-f", "concat", "-safe", "0",
+                "-i", concat_list, "-r", str(FPS),
+                *NVENC_HQ_ARGS, "-an", run_out,
+            ]
+            reenc_timeout = max(600, min(1800, int((expected_dur or 700) * 3) + 120))
+            result = _run_ffmpeg_with_nvenc_fallback(cmd_reenc, timeout=reenc_timeout, label=f"run {run_idx} mixed_reencode")
+            if result.returncode != 0:
+                try: os.remove(concat_list)
+                except OSError: pass
+                raise RuntimeError(f"Phase 2 run {run_idx} mixed re-encode failed: {result.stderr[-300:]}")
+            try: os.remove(concat_list)
+            except OSError: pass
+            mode_used = "reencode_mixed"
+            # Probe duration
+            if expected_dur is not None:
+                try:
+                    actual_dur = _get_video_duration(run_out)
+                    delta = expected_dur - actual_dur
+                    if abs(delta) > 0.5:
+                        raise RuntimeError(f"Phase 2 mixed run {run_idx} duration drift: expected={expected_dur:.3f} got={actual_dur:.3f} delta={delta:+.3f}s")
+                    print(f"  [run {run_idx:02d}] {len(run['segs'])} segs, mode={mode_used}, expected={expected_dur:.3f}s, got={actual_dur:.3f}s, delta={delta:+.3f}s")
+                except RuntimeError:
+                    raise
+                except Exception as e:
+                    print(f"  [run {run_idx:02d}] WARN duration probe failed: {e}")
+            run_paths.append(run_out)
+            continue
+
+        # Non-mixed run: try concat -c copy first (fast path, zero re-encode).
         # Lesson #87 fix (2026-04-25): added "-fps_mode passthrough" after Ray
         # detected progressive timing drift in 0003 nuevo (transitions ~22s
         # shorter than original by end of video). Root cause: muxer was dropping
