@@ -490,7 +490,7 @@ def _run_python_whisper_srt(workflow, dest, prefix, index=None):
         "word_timestamps": True,
         "condition_on_previous_text": False,
         "temperature": 0,
-        "no_speech_threshold": 0.4,
+        "no_speech_threshold": 0.55,
         "hallucination_silence_threshold": 2.0,
         "language": lang_code,
     }
