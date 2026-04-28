@@ -352,7 +352,7 @@ def _ensure_mark_local(r2_key):
 
 
 def apply_mark_signature(thumbnail_path, mark_path, output_path,
-                         size=90, position="br", padding=25, opacity=0.60):
+                         size=154, position="bl", padding=50, opacity=1.0):
     """Overlay brand mark signature on thumbnail.
 
     Separate from apply_text_overlay — runs AFTER text is composited so the
@@ -363,10 +363,20 @@ def apply_mark_signature(thumbnail_path, mark_path, output_path,
             of apply_text_overlay or the post-processed base if no text.
         mark_path: path del mark PNG (transparent background recommended).
         output_path: path destino del resultado.
-        size: tamaño del mark en target en px (default 90).
-        position: 'br' (bottom-right, default), 'bl', 'tr', 'tl'.
-        padding: margen desde el borde en px (default 25).
-        opacity: 0.0-1.0 del overlay final (default 0.60).
+        size: tamaño del mark en target en px (default 154 = 12% canvas height
+            per Dominion-Brand-Assets canonical doc).
+        position: 'bl' (bottom-left, default per canonical), 'br', 'tr', 'tl'.
+        padding: margen desde el borde en px (default 50 per canonical).
+        opacity: 0.0-1.0 del overlay final (default 1.0 = full visibility per
+            canonical, jewels rojos/azules de la corona deben verse plenos).
+
+    Defaults updated 2026-04-28 (sesión thumb 0004 fix). Previously: size=90,
+    position=br, padding=25, opacity=0.60. Old values produced too-faint logo
+    with details lost at downscale. Canonical brand moment per
+    `1_Activos_y_Recursos/Marcas/Dominion/Dominion - Brand Assets.md`.
+
+    Note: this default applies only when caller does NOT pass explicit override
+    via mark_signature payload. Per-video override remains supported.
 
     Returns output_path on success, None on failure. Fail-open philosophy:
     a missing/corrupt mark must NOT block thumbnail generation.
