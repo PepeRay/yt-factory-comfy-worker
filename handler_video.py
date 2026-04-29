@@ -1283,6 +1283,7 @@ def _compose_scene_manifest_impl(src, dest, content_id, config, channel, platfor
     # ── Phase 1: Render each scene to a normalized segment ──
     segment_paths = []
     skipped = 0
+    failed_scenes = []  # accumulator for fail-loud guard (lesson 2026-04-28)
 
     for scene in scenes:
         sid = scene["scene_id"]
@@ -1729,13 +1730,49 @@ def _compose_scene_manifest_impl(src, dest, content_id, config, channel, platfor
                 segment_paths.append({"path": seg_path, "scene": scene})
 
         except Exception as e:
-            print(f"ERROR scene {sid}: {e}")
+            err_msg = str(e)[:300]
+            print(f"ERROR scene {sid}: {err_msg}")
             skipped += 1
+            failed_scenes.append({
+                "sid": sid,
+                "type": scene.get("type", "?"),
+                "render_type": scene.get("render_type", "?"),
+                "error": err_msg,
+            })
 
     if not segment_paths:
         raise RuntimeError("No segments rendered successfully")
 
-    print(f"Phase 1 done: {len(segment_paths)} segments, {skipped} skipped")
+    # ── Phase 1 fail-loud guard (lesson 2026-04-28 freeze 3:21 incident) ──
+    # Pre-fix behavior: silent skip + Phase 2.5 ken_burns_slow on last valid frame
+    # extended merged video to audio length, producing freeze-tail final.mp4 with
+    # vid_status=ready (success técnico) but visually broken. Only detected when
+    # human reviewed the video.
+    #
+    # Post-fix: abort if too many scenes failed OR any video_clip failed (those
+    # are critical motion moments — losing one breaks narrative pacing).
+    # Marks vid_status=error explicitly with full detail of failed scenes so
+    # downstream triggers (Status Router) don't propagate broken assets.
+    total_scenes = len(scenes)
+    skip_threshold = max(5, int(total_scenes * 0.10))
+    video_clip_failures = [f for f in failed_scenes if f["render_type"] == "video_clip"]
+
+    if skipped > skip_threshold:
+        raise RuntimeError(
+            f"Phase 1 fail-loud: {skipped} scenes skipped (threshold {skip_threshold}, "
+            f"total {total_scenes}). Failed scenes: {failed_scenes[:10]}"
+            f"{' (+more)' if len(failed_scenes) > 10 else ''}. "
+            f"Aborting to prevent freeze-tail final.mp4."
+        )
+
+    if video_clip_failures:
+        raise RuntimeError(
+            f"Phase 1 fail-loud: {len(video_clip_failures)} video_clip scene(s) failed "
+            f"(critical motion moments). Failed: {video_clip_failures}. "
+            f"Aborting to prevent narrative pacing breakdown."
+        )
+
+    print(f"Phase 1 done: {len(segment_paths)} segments, {skipped} skipped (threshold {skip_threshold}, video_clip_failures=0)")
 
     # ── Phase 1.5: Insert freeze-frame fillers for gaps between scenes ──
     # Scene Director may emit gaps between consecutive scenes (scene[i+1].start_time
