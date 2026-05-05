@@ -260,18 +260,16 @@ def build_ffmpeg_audio_filter(
             # Lesson #92 (2026-04-26): Ray reportó musica audible pero "tenue"
             # tras Fix #1. Diagnostico: integrated -16.65 LUFS / LRA 3.30, bass
             # band -18.79 LUFS / LRA 3.80. La narration aplastaba la musica.
-            # Ajustes:
-            #   - baseline 0.7 -> 0.85: musica mas presente en pausas
-            #   - ratio 8 -> 4: ducking suave (-4 dB en lugar de -8 dB) para que
-            #     la musica se siga escuchando bajo la narration
-            #   - threshold 0.05 -> 0.03 (-30 dB): sigue triggering normal pero
-            #     menos sensible a respiraciones cortas que producen ducking
-            #     innecesario
-            #   - release 300 -> 400 ms: recuperacion mas natural sin pumping
-            parts.append(f"[{music_idx}:a]volume=0.85[music_raw]")
+            # Lesson #93 (2026-05-08): Ray reportó musica aún muy baja en 0006.
+            # Opción A aplicada:
+            #   - baseline 0.85 -> 0.95: música casi al máximo en pausas
+            #   - ratio 4 -> 3: ducking más suave (-3 dB en lugar de -4 dB) para
+            #     que música se escuche más fuerte bajo narration. Efectiva
+            #     post-ducking ~0.67 (vs 0.55 anterior, +22% loudness).
+            parts.append(f"[{music_idx}:a]volume=0.95[music_raw]")
             parts.append(
                 "[music_raw][narr_key]sidechaincompress="
-                "threshold=0.03:ratio=4:attack=50:release=400:makeup=1[music]"
+                "threshold=0.03:ratio=3:attack=50:release=400:makeup=1[music]"
             )
         else:
             # No narration to trigger ducking — fall back to static volume
