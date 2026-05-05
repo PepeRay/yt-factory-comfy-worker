@@ -67,14 +67,17 @@ ACCEPTED_JOB_TYPES = {
 # ~$0.40 → ~$0.05-0.10 per compose.
 #
 # NVENC preset mapping (p1=fastest → p7=slowest/best quality).
-# p5 + -tune hq ≈ libx264 fast/medium perceptual quality.
-# -cq is constant-quality (equivalent to libx264 -crf). cq 19 ≈ crf 18.
+# Lesson #94 (2026-05-08): bump quality params for YouTube competitiveness.
+# Was: p5 hq cq 19 (≈ libx264 fast/crf 18) → bitrate ~6 Mbps post-YouTube re-encode.
+# Now: p6 hq cq 16 (≈ libx264 medium/crf 15) → bitrate ~9 Mbps + better gradients.
+# Trade: +20-30% encode time, archives ~30% bigger, but YouTube favors quality
+# (less artifacts post their compression to ~3 Mbps).
 NVENC_HQ_ARGS = [
     "-c:v", "h264_nvenc",
-    "-preset", "p5",
+    "-preset", "p6",
     "-tune", "hq",
     "-rc", "vbr",
-    "-cq", "19",
+    "-cq", "16",
     "-b:v", "0",
     "-pix_fmt", "yuv420p",
     "-profile:v", "high",
@@ -84,6 +87,8 @@ NVENC_HQ_ARGS = [
 
 # Lower-quality preset for video clip normalization (replaces libx264 crf 26).
 # cq 23 ≈ crf 26 for the Wan 2.2 clip re-encode path.
+# Lesson #94 keeps NORM at cq 23 — Wan 2.2 outputs are already low-detail noise,
+# bumping quality on the re-encode is wasted compute.
 NVENC_NORM_ARGS = [
     "-c:v", "h264_nvenc",
     "-preset", "p5",
@@ -95,8 +100,11 @@ NVENC_NORM_ARGS = [
 ]
 
 # libx264 fallback equivalents (used only when NVENC is unavailable).
+# Lesson #94 (2026-05-08): preset fast → medium + crf 18 → crf 15.
+# Most Compose CPU runs hit this fallback (no GPU). Quality bump here is the
+# primary effect for YouTube post-compression artifacts.
 _X264_HQ_FALLBACK = [
-    "-c:v", "libx264", "-preset", "fast", "-crf", "18", "-pix_fmt", "yuv420p",
+    "-c:v", "libx264", "-preset", "medium", "-crf", "15", "-pix_fmt", "yuv420p",
 ]
 _X264_NORM_FALLBACK = [
     "-c:v", "libx264", "-preset", "fast", "-crf", "26", "-pix_fmt", "yuv420p",
