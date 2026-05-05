@@ -640,7 +640,7 @@ def _parse_time_to_seconds(value):
 def _pad_segment_to_duration(seg_path, out_path, pad_duration, width, height, fps):
     """Create a new segment = seg_path + freeze-frame tail of pad_duration seconds."""
     vf = (
-        f"scale={width}:{height}:force_original_aspect_ratio=increase,"
+        f"scale={width}:{height}:flags=lanczos:force_original_aspect_ratio=increase,"
         f"crop={width}:{height},setsar=1,"
         f"tpad=stop_mode=clone:stop_duration={pad_duration:.4f}"
     )
@@ -895,7 +895,7 @@ def _render_image_effect(effect, img_a, img_b, duration, seg_path, w, h, fps):
     # ---- Static: single image, no movement ------------------------------
     elif effect == "static":
         fc = (
-            f"scale={w}:{h}:force_original_aspect_ratio=increase,"
+            f"scale={w}:{h}:flags=lanczos:force_original_aspect_ratio=increase,"
             f"crop={w}:{h},setsar=1,format=yuv420p"
         )
 
@@ -929,7 +929,7 @@ def _render_image_effect(effect, img_a, img_b, duration, seg_path, w, h, fps):
     else:
         print(f"[effect] unknown '{original_effect}', fallback → static")
         fc = (
-            f"scale={w}:{h}:force_original_aspect_ratio=increase,"
+            f"scale={w}:{h}:flags=lanczos:force_original_aspect_ratio=increase,"
             f"crop={w}:{h},setsar=1,format=yuv420p"
         )
 
@@ -943,8 +943,8 @@ def _render_parallax(img_fg, img_bg, duration, seg_path, w, h, fps):
     # bg: heavy blur, subtle pan; fg: full res, twice the pan speed.
     # Both scaled to w*1.25 so panning has travel room.
     fc = (
-        f"[0:v]scale={int(w*1.25)}:-1,crop={w}:{h}:x='(iw-{w})*(on/{frames})*0.5':y='(ih-{h})/2',setsar=1[fg];"
-        f"[1:v]scale={int(w*1.4)}:-1,boxblur=20:2,crop={w}:{h}:x='(iw-{w})*(on/{frames})*0.2':y='(ih-{h})/2',setsar=1[bg];"
+        f"[0:v]scale={int(w*1.25)}:-1:flags=lanczos,crop={w}:{h}:x='(iw-{w})*(on/{frames})*0.5':y='(ih-{h})/2',setsar=1[fg];"
+        f"[1:v]scale={int(w*1.4)}:-1:flags=lanczos,boxblur=20:2,crop={w}:{h}:x='(iw-{w})*(on/{frames})*0.2':y='(ih-{h})/2',setsar=1[bg];"
         f"[bg][fg]overlay=0:0:format=auto,format=yuv420p"
     )
     cmd = [
@@ -967,9 +967,9 @@ def _render_match_cut(img_a, img_b, duration, seg_path, w, h, fps):
     Hard cut at exactly duration/2. Director guarantees composition alignment."""
     half = duration / 2.0
     fc = (
-        f"[0:v]scale={w}:{h}:force_original_aspect_ratio=increase,"
+        f"[0:v]scale={w}:{h}:flags=lanczos:force_original_aspect_ratio=increase,"
         f"crop={w}:{h},setsar=1,format=yuv420p,trim=duration={half:.4f}[a];"
-        f"[1:v]scale={w}:{h}:force_original_aspect_ratio=increase,"
+        f"[1:v]scale={w}:{h}:flags=lanczos:force_original_aspect_ratio=increase,"
         f"crop={w}:{h},setsar=1,format=yuv420p,trim=duration={half:.4f}[b];"
         f"[a][b]concat=n=2:v=1:a=0[v]"
     )
@@ -1133,7 +1133,7 @@ def _render_particles(img_path, particles_path, duration, seg_path, w, h, fps):
         f"zoompan=z='{z}':x='{cx}':y='{cy}'"
         f":d={frames}:s={w}x{h}:fps={fps},format=gbrp[base];"
         f"[1:v]loop=loop=-1:size=260:start=0,setpts=N/FRAME_RATE/TB,"
-        f"scale={w}:{h},fps={fps},eq=brightness=-0.02,format=gbrp[parts];"
+        f"scale={w}:{h}:flags=lanczos,fps={fps},eq=brightness=-0.02,format=gbrp[parts];"
         f"[base][parts]blend=all_mode=screen:shortest=1,format=yuv420p"
     )
     cmd = [
@@ -1175,7 +1175,7 @@ def _apply_particles_overlay(video_path, seg_path, duration, w, h, fps):
     fc = (
         f"[0:v]format=gbrp[base];"
         f"[1:v]loop=loop=-1:size=260:start=0,setpts=N/FRAME_RATE/TB,"
-        f"scale={w}:{h},fps={fps},eq=brightness=-0.02,format=gbrp[parts];"
+        f"scale={w}:{h}:flags=lanczos,fps={fps},eq=brightness=-0.02,format=gbrp[parts];"
         f"[base][parts]blend=all_mode=screen:shortest=1,format=yuv420p"
     )
     cmd = [
@@ -1263,7 +1263,7 @@ def _compose_scene_manifest_impl(src, dest, content_id, config, channel, platfor
     _gen_w, _gen_h, WIDTH, HEIGHT, FPS = PLATFORM_FORMATS.get(platform, DEFAULT_FORMAT)
     # NOTE: NORM string is unused (kept for backwards reference). Actual
     # normalization uses the NVENC_NORM_ARGS list built inline below.
-    NORM = f"-vf scale={WIDTH}:{HEIGHT}:force_original_aspect_ratio=increase,crop={WIDTH}:{HEIGHT},setsar=1 -r {FPS} -c:v h264_nvenc -preset p5 -tune hq -rc vbr -cq 23 -b:v 0 -pix_fmt yuv420p -an"
+    NORM = f"-vf scale={WIDTH}:{HEIGHT}:flags=lanczos:force_original_aspect_ratio=increase,crop={WIDTH}:{HEIGHT},setsar=1 -r {FPS} -c:v h264_nvenc -preset p5 -tune hq -rc vbr -cq 23 -b:v 0 -pix_fmt yuv420p -an"
 
     # Directory for extracted ambient audio from video clips
     ambient_dir = os.path.join(segments_dir, "_ambient")
@@ -1332,7 +1332,7 @@ def _compose_scene_manifest_impl(src, dest, content_id, config, channel, platfor
                     # Uses NVENC_NORM_ARGS (cq 23 ≈ libx264 crf 26).
                     norm_args = [
                         "-vf",
-                        f"scale={WIDTH}:{HEIGHT}:force_original_aspect_ratio=increase,"
+                        f"scale={WIDTH}:{HEIGHT}:flags=lanczos:force_original_aspect_ratio=increase,"
                         f"crop={WIDTH}:{HEIGHT},setsar=1",
                         "-r", str(FPS),
                         *NVENC_NORM_ARGS, "-an",
@@ -1518,7 +1518,7 @@ def _compose_scene_manifest_impl(src, dest, content_id, config, channel, platfor
                 # has Wan 2.2's hardcoded 5.0625s constraint).
                 norm_args = [
                     "-vf",
-                    f"scale={WIDTH}:{HEIGHT}:force_original_aspect_ratio=increase,"
+                    f"scale={WIDTH}:{HEIGHT}:flags=lanczos:force_original_aspect_ratio=increase,"
                     f"crop={WIDTH}:{HEIGHT},setsar=1",
                     "-r", str(FPS),
                     *NVENC_NORM_ARGS, "-an",
@@ -1570,8 +1570,8 @@ def _compose_scene_manifest_impl(src, dest, content_id, config, channel, platfor
                         "-loop", "1", "-i", img_a,
                         "-loop", "1", "-i", img_b,
                         "-filter_complex",
-                        f"[0:v]scale={WIDTH}:{HEIGHT},setsar=1,format=yuv420p[a];"
-                        f"[1:v]scale={WIDTH}:{HEIGHT},setsar=1,format=yuv420p[b];"
+                        f"[0:v]scale={WIDTH}:{HEIGHT}:flags=lanczos,setsar=1,format=yuv420p[a];"
+                        f"[1:v]scale={WIDTH}:{HEIGHT}:flags=lanczos,setsar=1,format=yuv420p[b];"
                         f"[a][b]blend=all_expr='A*(1-T/{duration})+B*(T/{duration})':shortest=1",
                         "-t", str(duration), "-r", str(FPS),
                         *NVENC_HQ_ARGS, crossfade_out
@@ -1631,8 +1631,8 @@ def _compose_scene_manifest_impl(src, dest, content_id, config, channel, platfor
                         "-loop", "1", "-i", img_a,
                         "-loop", "1", "-i", img_b,
                         "-filter_complex",
-                        f"[0:v]scale={WIDTH}:{HEIGHT},setsar=1,format=yuv420p[a];"
-                        f"[1:v]scale={WIDTH}:{HEIGHT},setsar=1,format=yuv420p[b];"
+                        f"[0:v]scale={WIDTH}:{HEIGHT}:flags=lanczos,setsar=1,format=yuv420p[a];"
+                        f"[1:v]scale={WIDTH}:{HEIGHT}:flags=lanczos,setsar=1,format=yuv420p[b];"
                         f"[a][b]blend=all_expr='A*(1-T/{duration})+B*(T/{duration})':shortest=1",
                         "-t", str(duration), "-r", str(FPS),
                         *NVENC_HQ_ARGS, out,
@@ -1672,8 +1672,8 @@ def _compose_scene_manifest_impl(src, dest, content_id, config, channel, platfor
                             "-loop", "1", "-i", img_a,
                             "-loop", "1", "-i", img_b,
                             "-filter_complex",
-                            f"[0:v]scale={WIDTH}:{HEIGHT},setsar=1,format=yuv420p[a];"
-                            f"[1:v]scale={WIDTH}:{HEIGHT},setsar=1,format=yuv420p[b];"
+                            f"[0:v]scale={WIDTH}:{HEIGHT}:flags=lanczos,setsar=1,format=yuv420p[a];"
+                            f"[1:v]scale={WIDTH}:{HEIGHT}:flags=lanczos,setsar=1,format=yuv420p[b];"
                             f"[a][b]blend=all_expr='A*(1-T/{duration})+B*(T/{duration})':shortest=1",
                             "-t", str(duration), "-r", str(FPS),
                             *NVENC_HQ_ARGS, out_path,
@@ -3260,13 +3260,13 @@ def _render_short(job_input):
         # Special case crop_pct=67: legacy pure 9:16 center crop (no letterbox).
         if framing_crop_pct >= 66.99:
             # Legacy: full 9:16 crop, fills 1080×1920 entirely
-            vf_base = "crop=ih*9/16:ih:((iw-ih*9/16)/2):0,scale=1080:1920,setsar=1"
+            vf_base = "crop=ih*9/16:ih:((iw-ih*9/16)/2):0,scale=1080:1920:flags=lanczos,setsar=1"
         elif framing_bg_mode == "black":
             # Crop horizontal % from center, scale to 1080 wide, pad to 1080×1920 black
             crop_factor = (100 - framing_crop_pct) / 100.0
             vf_base = (
                 f"crop=iw*{crop_factor:.4f}:ih,"
-                f"scale=1080:-2,"
+                f"scale=1080:-2:flags=lanczos,"
                 f"pad=1080:1920:(ow-iw)/2:(oh-ih)/2:color=black,"
                 f"setsar=1"
             )
@@ -3275,9 +3275,9 @@ def _render_short(job_input):
             crop_factor = (100 - framing_crop_pct) / 100.0
             vf_base = (
                 f"split[orig][cropme];"
-                f"[orig]scale=1080:1920:force_original_aspect_ratio=increase,"
+                f"[orig]scale=1080:1920:flags=lanczos:force_original_aspect_ratio=increase,"
                 f"crop=1080:1920,boxblur=20:2[bg];"
-                f"[cropme]crop=iw*{crop_factor:.4f}:ih,scale=1080:-2[main];"
+                f"[cropme]crop=iw*{crop_factor:.4f}:ih,scale=1080:-2:flags=lanczos[main];"
                 f"[bg][main]overlay=(W-w)/2:(H-h)/2,setsar=1"
             )
         vf = vf_base
