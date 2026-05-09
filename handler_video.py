@@ -670,7 +670,14 @@ def _ensure_compose_inputs(channel, content_id, src, dest):
     infrastructure; trivial compared to guaranteeing fresh content)."""
     if not R2_ENABLED:
         return
-    for subdir in ("images", "video", "audio", "srt"):
+    # 2026-05-09: added "stock" subdir to support stock footage integration
+    # (Sprint 1 Stock Footage). Pre-handler stock_fetcher.py downloads Pexels
+    # videos + Wikipedia images to dominion/{video_id}/source/stock/. The
+    # handler treats them as regular video_clip / image inputs after the
+    # orchestrator copies them to the canonical paths in video/ and images/.
+    # Adding "stock" here ensures defense-in-depth sync — even if orchestrator
+    # skips copy step, the stock files reach the worker filesystem.
+    for subdir in ("images", "video", "audio", "srt", "stock"):
         local_dir = os.path.join(src, subdir)
         r2_prefix = f"{channel}/{content_id}/source/{subdir}/"
         try:
