@@ -274,7 +274,12 @@ def build_ffmpeg_audio_filter(
             #   - ratio 4 -> 3: ducking más suave (-3 dB en lugar de -4 dB) para
             #     que música se escuche más fuerte bajo narration. Efectiva
             #     post-ducking ~0.67 (vs 0.55 anterior, +22% loudness).
-            parts.append(f"[{music_idx}:a]volume=0.95[music_raw]")
+            # Lesson #99 (2026-05-10): Ray reportó música casi nada alta en 0009.
+            # Diagnostico: 0009 integrated -16.52 LUFS (vs 0008 -17.1), bass band
+            # -18.63 LUFS (vs 0008 -19.5). Music +0.9 dB louder than ideal.
+            # Bajar baseline 0.95 -> 0.88 (~-0.7 dB) para llevar music a tier
+            # similar a 0008. Mantener ratio=3 (sidechain ducking suave).
+            parts.append(f"[{music_idx}:a]volume=0.88[music_raw]")
             parts.append(
                 "[music_raw][narr_key]sidechaincompress="
                 "threshold=0.03:ratio=3:attack=50:release=400:makeup=1[music]"
@@ -317,14 +322,21 @@ def build_ffmpeg_audio_filter(
     if not labels:
         return ""
 
+    # Lesson #99 (2026-05-10): Ray reportó "ruido raro al inicio" en 0009.
+    # Diagnostico: RMS waveform shows abrupt jump from -35dB (silence/quiet floor)
+    # to -17dB at t=0.6s (~+18dB in 80ms). TTS audio padding + abrupt narration
+    # start causes audible pop/transient. Fix: afade=t=in:d=0.5 al output final
+    # mix suaviza primeros 500ms (smooth ramp del silence al full audio level).
+    # Applied AFTER loudnorm so LUFS measurement no se afecta.
     if len(labels) == 1:
-        # Single source - no amix, just alias with acopy
-        parts.append(f"{labels[0]}acopy[aout]")
+        # Single source - no amix, just alias with acopy + intro fade
+        parts.append(f"{labels[0]}acopy,afade=t=in:d=0.5[aout]")
     else:
         all_in = "".join(labels)
         parts.append(
             f"{all_in}amix=inputs={len(labels)}:normalize=0:duration=longest,"
-            f"loudnorm=I=-16:TP=-1.5:LRA=11[aout]"
+            f"loudnorm=I=-16:TP=-1.5:LRA=11,"
+            f"afade=t=in:d=0.5[aout]"
         )
 
     return ";".join(parts)
